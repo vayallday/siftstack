@@ -1,0 +1,6 @@
+RadarID,Address,City,State,ZIP Code,County,Assessed Owner,Primary Contact Full Name,Mailing Address,Mailing City,Mailing State,Mailing ZIP Code,Estimated Value,Estimated Equity %,Sale Date,Trustee,Default Amount,Owner Occupied,Year Built
+PR1000001,101 Maple Cove Ln,Richmond,VA,23220,Richmond City,"DOE, JANE A",Jane A Doe,101 Maple Cove Ln,Richmond,VA,23220,425000,62,2026-06-15,Substitute Trustee Services LLC,287500,Yes,1958
+PR1000002,2240 Oakridge Ter,Henrico,VA,23228,Henrico,"SMITH, JOHN R",John R Smith,PO Box 4488,Henrico,VA,23228,612000,48,2026-07-02,BWW Law Group LLC,341200,No,1972
+PR1000003,8801 Brookwood Dr,Chesterfield,VA,23832,Chesterfield,"GARCIA, MARIA",Maria Garcia,8801 Brookwood Dr,Chesterfield,VA,23832,389000,71,2026-06-28,Samuel I White PC,221000,Yes,1965
+PR1000004,15 Falls Church Ct,Bowie,MD,20716,Prince George's,"WALKER, ROBERT E",Robert E Walker,15 Falls Church Ct,Bowie,MD,20716,498000,55,2026-07-10,Cohn Goldberg & Deutsch LLC,302800,Yes,1981
+PR1000005,7702 Rockville Pike Apt 3B,Rockville,MD,20852,Montgomery,"LEE, PATRICIA",Patricia Lee,9912 Birchwood Way,Gaithersburg,MD,20878,725000,38,2026-08-01,Atlantic Law Group LLC,498000,No,1996
