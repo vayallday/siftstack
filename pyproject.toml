@@ -1,0 +1,14 @@
+# SiftStack — minimal pyproject.toml. Currently only configures pytest.
+# The project is run as `python src/main.py ...` and deployed as an Apify Actor;
+# there is no PyPI distribution, so no [project] or [build-system] tables are needed.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+markers = [
+    "live_pr: opt-in integration tests against the live PropertyRadar account (costs real billing — run manually with -m live_pr only)",
+]

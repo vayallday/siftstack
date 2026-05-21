@@ -1,0 +1,5 @@
+# ── Development-only Python dependencies ───────────────────────────
+# NOT installed in the Apify Actor image — keeps Docker layer lean.
+# Install locally with: pip install -r requirements-dev.txt
+pytest>=8.0.0
+pytest-asyncio>=0.23.0
