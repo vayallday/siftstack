@@ -411,3 +411,51 @@ plugin-name.plugin (ZIP containing):
 │       └── references/
 └── README.md
 ```
+
+## My Defaults
+
+- **Primary markets:**
+  - Richmond, Virginia
+  - Henrico, Virginia
+  - Chesterfield, Virginia
+  - Prince William County, Virginia
+  - Prince George's County, Maryland
+  - Montgomery County, Maryland
+- **Data source:** `app.propertyradar.com` (nationwide property data platform — replaces tnpublicnotice.com for VA/MD markets)
+- **Notifications:** Send daily summaries to Slack
+- **Preferred run time:** 5:00 AM
+- **Dispositions:** Send to DataSift List `Siftstack`
+
+### PropertyRadar Migration Notes
+
+The current codebase (scraper.py, captcha_solver.py, notice_parser.py, foreclosure_filter.py) targets tnpublicnotice.com and is TN-only. PropertyRadar is the intended replacement data source for VA/MD markets, but the migration has not been built yet.
+
+**Source-of-truth pattern:** User has already created PropertyRadar Lists in the app that auto-refresh daily with new matching properties. The integration is therefore not about building searches — it's about pulling **new records added to those lists since the last run** and feeding them through the existing enrichment + DataSift upload pipeline. This matches the existing `daily` mode mental model (delta since `last_run.json`).
+
+**Configured PropertyRadar Lists** (mixed counties/cities within each state):
+
+| List name in PropertyRadar | Markets | Notice type | Notes |
+|---|---|---|---|
+| `MD_Auction in 90 Days_No Pre-Probate_No Vacant` | MD (Prince George's, Montgomery) | `foreclosure` | Auction within 90 days; excludes pre-probate + vacant |
+| `VA_Auction in 90 Days_No Pre-Probate_No Vacant` | VA (Richmond, Henrico, Chesterfield, Prince William) | `foreclosure` | Auction within 90 days; excludes pre-probate + vacant |
+| `MD_Pre-Probate_Distress >60_Occupied` | MD (Prince George's, Montgomery) | `pre_probate` | Deceased-owner signal + Distress Score > 60 + occupied |
+| `VA_Pre-Probate_Distress >60_Occupied` | VA (Richmond, Henrico, Chesterfield, Prince William) | `pre_probate` | Deceased-owner signal + Distress Score > 60 + occupied |
+
+This adds an **8th notice type** (`pre_probate`) to the existing 7 — distinct from court-filed `probate` because no PR/executor is named yet; the owner is just deceased per property records. Court probate, eviction, and code violation in VA/MD will come from a different source (TBD).
+
+**Decisions locked:**
+- **Transport:** Playwright against web UI (current Solo/Team tier — no Business plan upgrade).
+- **Cadence:** daily, aligned with user's 5:00 AM run time.
+- **Delta:** filter each list by "Added to List" date ≥ last successful run timestamp before exporting (records are billed; never re-export full list).
+- **Coexistence:** PropertyRadar puller runs alongside the existing TN scraper, not as a replacement — gated by `--source propertyradar` CLI flag (or new mode).
+
+Key facts to consider when planning:
+
+- **REST API exists** — Bearer-token auth, JSON, 250+ search criteria. Endpoints: `/Properties`, `/Lists`, webhooks. Docs: https://developers.propertyradar.com/
+- **API access requires Business plan** ($599/mo, 50K records). Solo ($119) and Team ($249) plans are web-UI only.
+- **VA/MD data coverage gaps:** Foreclosure ✓, Divorce ✓, Assessor/Recorder ✓. Probate, Eviction, Code Violation — **NOT available** in VA/MD (these are the photo-import notice types in the current pipeline). Tax Delinquent coverage varies by county and needs verification.
+- **Web UI export workflow:** Open list → "..." menu → Export to File → field set → CSV/XLSX. Async for large exports (email delivery). Records count against monthly quota; re-exports of same list still consume quota — must filter to "new since last run" before export.
+- **List delta strategy:** PropertyRadar lists track when each property was added via the "Added Date" / "First Added to List" field. Filter on this before export to pull only new records since last cron run. Persist last-seen timestamp per list (analogous to current `last_run.json`).
+- **If using web UI only** (current account state): Playwright automation against `app.propertyradar.com` → log in → navigate to each named list → apply "added since X" filter → export wizard → CSV. Pattern is similar to existing [datasift_uploader.py](src/datasift_uploader.py).
+- **If on Business plan:** Use Lists API to query members added since a timestamp + webhooks to push to our endpoint on list-membership changes (true event-driven, no polling).
+- **Enrichment overlap:** PropertyRadar natively includes owner name, mailing address, equity, est value, phones/emails (paid append), foreclosure stage, trustee details. Switching could simplify or eliminate several current enrichment steps (Smarty, Zillow, Knox Tax API, Tracerfy). Trestle phone scoring may still add value; obituary/heir research stays for probate (but probate isn't in PR for VA/MD).
