@@ -76,6 +76,13 @@ SEL_PR_EXPORT_CSV_RADIO = _SENTINEL     # CSV format selector
 SEL_PR_EXPORT_DOWNLOAD = _SENTINEL      # Download button (sync path)
 SEL_PR_DOWNLOADS_AREA = _SENTINEL       # in-app downloads/inbox area (async fallback)
 
+# Membership scrape selectors (PR-08 — free pagination read of list RadarIDs,
+# no export billing). Captured in Plan 03 alongside the export-wizard selectors.
+SEL_PR_LIST_ROW = _SENTINEL             # one row in the list table (will be queried as page.locator(...).all())
+SEL_PR_ROW_RADAR_ID = _SENTINEL         # RadarID cell within a row (relative selector)
+SEL_PR_PAGINATION_NEXT = _SENTINEL      # "Next page" button in the list pagination
+SEL_PR_PAGINATION_INFO = _SENTINEL      # "1-20 of N" pagination info text (used to detect last page)
+
 
 # ── List Configuration (locked per DEC-pr-lists) ───────────────────
 @dataclass
