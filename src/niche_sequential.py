@@ -7,7 +7,7 @@ Implements the DataSift niche sequential marketing workflow:
 
 Channels escalate by cost: SMS ($0.01) → Call ($0.03-0.06) → Mail ($0.50-2.00) → Deep Prospecting ($1.50-4.00)
 
-12 filter presets in "00 Niche Sequential Marketing" folder:
+13 filter presets in "00 Niche Sequential Marketing" folder:
   00. Needs Skip Traced
   01. Ready to Text
   02-04. Needs Called Day 1/2/3
@@ -18,6 +18,7 @@ Channels escalate by cost: SMS ($0.01) → Call ($0.03-0.06) → Mail ($0.50-2.0
   09. Not Interested
   10. Bad Data
   11. Completed Cycle
+  12. Pre-Probate Heir Discovery (gates pre_probate without confirmed DM out of SMS/call)
 
 Usage:
   python src/main.py niche-sequential --list-name "Foreclosure" --channel sms --day 1
@@ -125,6 +126,17 @@ PRESETS = [
         "filter": {"has_tag": "cycle_complete", "not_tag": "hot"},
         "action": "Move to nurture list, schedule monthly touch",
     },
+    {
+        "number": "12",
+        "name": "12. Pre-Probate Heir Discovery",
+        "description": "Pre-probate records (PR-deceased signal) without a confirmed DM — "
+                       "the property owner is dead and no obituary match found a living "
+                       "heir, so SMS/call to the property/owner address would be wasted",
+        "filter": {"has_tag": "pre_probate", "not_tag": "has_dm",
+                   "status_not": "Sold"},
+        "action": "Route to deep_prospector.py for Level 1-3 heir research; "
+                  "gate downstream contact presets (01-05) on has_dm",
+    },
 ]
 
 
@@ -161,7 +173,18 @@ def export_sms_list(records: list[dict], day: int = 1,
         3: "Last message — {name}, I have a cash offer ready for {address}. "
            "If the timing isn't right, no worries. Let me know! — [Your Name]",
     }
-    template = sms_templates.get(day, sms_templates[1])
+    # Pre-probate records reach SMS only after obituary enrichment named a DM
+    # (heir). The property owner is deceased, so "your property" framing is
+    # wrong — address the heir directly and acknowledge the passing.
+    heir_templates = {
+        1: "Hi {name}, I came across the property at {address} and understand the owner "
+           "has passed. I work with families navigating these situations — happy to "
+           "share options if it'd help. — [Your Name]",
+        2: "Hi {name}, following up on {address}. If the family is thinking about next "
+           "steps, I can put together a no-obligation cash offer. — [Your Name]",
+        3: "Final note — {name}, I'm still able to make a fair cash offer on {address} "
+           "if it would help the family. No pressure either way. — [Your Name]",
+    }
 
     with open(output_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=["name", "phone", "message", "address"])
@@ -170,6 +193,9 @@ def export_sms_list(records: list[dict], day: int = 1,
             name = rec.get("owner_name") or rec.get("full_name") or "there"
             phone = rec.get("primary_phone") or rec.get("mobile_1") or rec.get("Phone 1") or ""
             address = rec.get("address") or rec.get("Property Street") or ""
+            notice = (rec.get("notice_type") or "").lower()
+            template_set = heir_templates if notice == "pre_probate" else sms_templates
+            template = template_set.get(day, template_set[1])
             if phone:
                 writer.writerow({
                     "name": name,
