@@ -12,6 +12,14 @@
             "default": "daily",
             "editor": "select"
         },
+        "source": {
+            "title": "Acquisition Source",
+            "type": "string",
+            "description": "tnpn = scrape tnpublicnotice.com (TN only — default for back-compat); propertyradar = pull from configured PR lists (VA/MD via Playwright web UI)",
+            "enum": ["tnpn", "propertyradar"],
+            "default": "tnpn",
+            "editor": "select"
+        },
         "counties": {
             "title": "Counties",
             "type": "array",
@@ -61,6 +69,20 @@
             "title": "2Captcha API Key",
             "type": "string",
             "description": "API key from 2captcha.com for reCAPTCHA solving",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "pr_username": {
+            "title": "PropertyRadar Email",
+            "type": "string",
+            "description": "Login email for app.propertyradar.com (Solo/Team tier). Required when source = propertyradar.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "pr_password": {
+            "title": "PropertyRadar Password",
+            "type": "string",
+            "description": "Login password for app.propertyradar.com. Required when source = propertyradar.",
             "editor": "textfield",
             "isSecret": true
         },

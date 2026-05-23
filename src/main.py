@@ -51,10 +51,16 @@ def _filter_searches(
 # ── Preflight health checks ─────────────────────────────────────────
 
 
-def _preflight_check(mode: str) -> list[str]:
+def _preflight_check(mode: str, source: str | None = None) -> list[str]:
     """Verify required API keys and service connectivity before running.
 
     Returns a list of failure descriptions. Empty list = all checks passed.
+
+    `source` selects which scrape acquisition source's credentials get
+    checked. Only meaningful when `mode in {"daily", "historical"}`:
+      - None / "tnpn" (default): check TNPN + CAPTCHA (existing TN scraper).
+      - "propertyradar": check PROPERTYRADAR_* only; skip CAPTCHA / TN
+        connectivity (PR puller doesn't use either).
     """
     failures: list[str] = []
 
@@ -63,11 +69,25 @@ def _preflight_check(mode: str) -> list[str]:
     enrichment_modes = scrape_modes | {"pdf-import", "photo-import", "dropbox-watch", "csv-import"}
     datasift_modes = {"manage-presets", "manage-sold", "phone-validate"}
 
+    effective_source = (source or "tnpn").lower()
+
     if mode in scrape_modes:
-        if not config.TNPN_EMAIL or not config.TNPN_PASSWORD:
-            failures.append("TNPN_EMAIL / TNPN_PASSWORD not set (required for scraping)")
-        if not config.CAPTCHA_API_KEY:
-            failures.append("CAPTCHA_API_KEY not set (CAPTCHA solving will fail)")
+        if effective_source == "propertyradar":
+            # Lazy import — keeps the TN path importable even if Plan 02's
+            # propertyradar_config has a transient issue.
+            from propertyradar_config import (
+                PROPERTYRADAR_EMAIL, PROPERTYRADAR_PASSWORD,
+            )
+            if not PROPERTYRADAR_EMAIL or not PROPERTYRADAR_PASSWORD:
+                failures.append(
+                    "PROPERTYRADAR_EMAIL / PROPERTYRADAR_PASSWORD not set "
+                    "(required for --source propertyradar)"
+                )
+        else:
+            if not config.TNPN_EMAIL or not config.TNPN_PASSWORD:
+                failures.append("TNPN_EMAIL / TNPN_PASSWORD not set (required for TN scraping)")
+            if not config.CAPTCHA_API_KEY:
+                failures.append("CAPTCHA_API_KEY not set (CAPTCHA solving will fail)")
 
     if mode in enrichment_modes:
         # These are warnings, not blockers — pipeline degrades gracefully
@@ -90,8 +110,10 @@ def _preflight_check(mode: str) -> list[str]:
         if not config.TRESTLE_API_KEY:
             failures.append("TRESTLE_API_KEY not set (required for phone validation)")
 
-    # ── Connectivity checks (only for scrape modes) ─────────────────
-    if mode in scrape_modes:
+    # ── Connectivity checks (only for TN scrape modes) ─────────────
+    # PR puller doesn't hit tnpublicnotice.com; PR's own connectivity is
+    # checked implicitly by the puller's login retry loop.
+    if mode in scrape_modes and effective_source == "tnpn":
         import requests as _requests
         try:
             resp = _requests.head(config.BASE_URL, timeout=10, allow_redirects=True)
@@ -100,8 +122,8 @@ def _preflight_check(mode: str) -> list[str]:
         except Exception as e:
             failures.append(f"Cannot reach tnpublicnotice.com: {e}")
 
-    # ── 2Captcha balance check ──────────────────────────────────────
-    if mode in scrape_modes and config.CAPTCHA_API_KEY:
+    # ── 2Captcha balance check (TN only — PR puller doesn't use 2Captcha) ─
+    if mode in scrape_modes and effective_source == "tnpn" and config.CAPTCHA_API_KEY:
         import requests as _requests
         try:
             resp = _requests.get(
@@ -163,6 +185,8 @@ async def actor_main() -> None:
             "DATASIFT_PASSWORD": actor_input.get("datasift_password", ""),
             "SLACK_WEBHOOK_URL": actor_input.get("slack_webhook_url", ""),
             "TRESTLE_API_KEY": actor_input.get("trestle_api_key", ""),
+            "PROPERTYRADAR_EMAIL": actor_input.get("pr_username", ""),
+            "PROPERTYRADAR_PASSWORD": actor_input.get("pr_password", ""),
         }
         for key, val in _cred_map.items():
             setattr(config, key, val)
@@ -322,15 +346,26 @@ async def actor_main() -> None:
                 except Exception as e:
                     Actor.log.warning("Failed to persist seen_notice_ids to KVS: %s", e)
 
-            # ── Scrape ────────────────────────────────────────────────
-            notices = await scrape_all(
-                mode=mode, searches=searches, proxy_url=proxy_url, on_batch=push_batch,
-                since_date_override=since_date_override or None,
-                llm_api_key=config.ANTHROPIC_API_KEY or None,
-                start_page=start_page,
-                seen_ids=seen_ids,
-                on_search_complete=persist_seen_ids,
-            )
+            # ── Scrape — dispatch on `source` ─────────────────────────
+            # PR puller's signature is `pull_all_lists(lists=None, download_dir=None)`
+            # — no `mode` or `since_date_override` (PR has no Added-Date filter;
+            # delta is membership-diff per plan 02-04 SUMMARY).
+            source = (actor_input.get("source", "tnpn") or "tnpn").lower()
+            if source == "propertyradar":
+                from propertyradar_puller import pull_all_lists
+                Actor.log.info("Running PropertyRadar puller (source=propertyradar)")
+                notices = await pull_all_lists(
+                    download_dir=config.OUTPUT_DIR,
+                )
+            else:
+                notices = await scrape_all(
+                    mode=mode, searches=searches, proxy_url=proxy_url, on_batch=push_batch,
+                    since_date_override=since_date_override or None,
+                    llm_api_key=config.ANTHROPIC_API_KEY or None,
+                    start_page=start_page,
+                    seen_ids=seen_ids,
+                    on_search_complete=persist_seen_ids,
+                )
             # Handle async probate lookup before pipeline (requires await)
             probate_notices = [n for n in notices if n.notice_type == "probate" and n.decedent_name and not n.address]
             if probate_notices:
@@ -1068,6 +1103,17 @@ def cli_main() -> None:
         action="store_true",
         help="Enable debug logging",
     )
+    parser.add_argument(
+        "--source",
+        type=str,
+        choices=["tnpn", "propertyradar"],
+        default=None,
+        help=(
+            "Acquisition source for daily/historical mode. "
+            "Default: tnpn (existing TN public-notice scraper). "
+            "propertyradar: pull from configured PR lists via Playwright (VA/MD markets)."
+        ),
+    )
 
     # PDF import arguments
     parser.add_argument(
@@ -1455,7 +1501,7 @@ def cli_main() -> None:
     setup_logging(args.verbose)
 
     # ── Preflight health checks ──────────────────────────────────────
-    preflight_failures = _preflight_check(args.mode)
+    preflight_failures = _preflight_check(args.mode, getattr(args, "source", None))
     if preflight_failures:
         for f in preflight_failures:
             logging.error("Preflight FAILED: %s", f)
@@ -1717,13 +1763,26 @@ def cli_main() -> None:
 
 def _run_scrape_pipeline(args, searches) -> None:
     """Run the daily/historical scrape → enrich → export → upload pipeline."""
-    # Scrape
-    notices = asyncio.run(scrape_all(
-        mode=args.mode, searches=searches,
-        llm_api_key=config.ANTHROPIC_API_KEY or None,
-        since_date_override=args.since,
-        max_notices=args.max_notices,
-    ))
+    # ── Acquisition: dispatch on --source ───────────────────────────
+    # PR puller's signature is `pull_all_lists(lists=None, download_dir=None)`
+    # — it has no `mode` or `since_date_override` because PR's UI has no
+    # Added-Date filter; delta is computed from a membership-set diff
+    # against pr_state.json (see plan 02-04 SUMMARY).
+    source = (getattr(args, "source", None) or "tnpn").lower()
+    if source == "propertyradar":
+        from propertyradar_puller import pull_all_lists
+        logger.info("Running PropertyRadar puller (--source propertyradar)")
+        notices = asyncio.run(pull_all_lists(
+            download_dir=config.OUTPUT_DIR,
+        ))
+    else:
+        logger.info("Running TN public-notice scraper (--source tnpn / default)")
+        notices = asyncio.run(scrape_all(
+            mode=args.mode, searches=searches,
+            llm_api_key=config.ANTHROPIC_API_KEY or None,
+            since_date_override=args.since,
+            max_notices=args.max_notices,
+        ))
     # Handle async probate lookup before pipeline (requires asyncio.run)
     probate_notices = [n for n in notices if n.notice_type == "probate" and n.decedent_name and not n.address]
     if probate_notices:
