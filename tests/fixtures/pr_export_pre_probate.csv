@@ -1,4 +1,4 @@
-RadarID,Address,City,State,ZIP Code,County,Assessed Owner,Primary Contact Full Name,Mailing Address,Mailing City,Mailing State,Mailing ZIP Code,Estimated Value,Estimated Equity %,Sale Date,Trustee,Default Amount,Owner Occupied,Year Built
+Radar ID,Address,City,State,ZIP,County,Owner,Primary Name,Mail Address,Mail City,Mail State,Mail ZIP,Est Value,Est Equity %,Orig Sale Date,Trustee,Default Amount,Owner Occupied,Yr Built
 PR2000001,3344 Sycamore Hill Rd,Richmond,VA,23225,Richmond City,"BROWN, ALICE M","",3344 Sycamore Hill Rd,Richmond,VA,23225,318000,100,,,,Yes,1948
 PR2000002,5510 Pine Knoll Ave,Henrico,VA,23231,Henrico,"WILSON, GEORGE H","",5510 Pine Knoll Ave,Henrico,VA,23231,402000,87,,,,Yes,1955
 PR2000003,710 Cedar Glen Way,Manassas,VA,20109,Prince William,"THOMPSON FAMILY TRUST","",710 Cedar Glen Way,Manassas,VA,20109,556000,92,,,,Yes,1968

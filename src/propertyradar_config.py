@@ -99,11 +99,13 @@ SEL_PR_NEW_SINCE_FILTER = "__N_A_PR_HAS_NO_ADDED_DATE_FILTER__"
 # detection, use JS_PR_GRID_STORE_COUNT below instead.
 SEL_PR_RESULT_COUNT = "__TBD_USE_JS_PR_GRID_STORE_COUNT_INSTEAD__"
 
-# Export wizard — SINGLE page. Field-set picker, Continue, and Purchase
-# all live on the same screen. Purchase is the direct action; Continue is
-# captured for completeness but not used in the puller's normal flow. The
-# CSV/XLSX format choice happens in the modal that opens AFTER Purchase.
-# See memory: propertyradar-export-wizard-single-page
+# Export wizard — TWO pages (verified live 2026-05-23 against MD_Auction;
+# the older "single-page" assumption was wrong):
+#   Page 1: pick field set in the combobox → click Continue
+#   Page 2: review purchase summary  → click Purchase
+# Then the "Download Export" modal opens with the CSV/XLSX format radio.
+# Purchase is NOT the quota-consuming action — the modal's Download click is.
+# See memory: propertyradar-export-wizard-two-step
 SEL_PR_EXPORT_MENU       = 'a.x-btn.fr-text-icon-button:has(.icon-pr-more):has-text("Actions")'
 SEL_PR_EXPORT_TO_FILE    = '[role="menuitem"]:has-text("Export to File")'
 SEL_PR_FIELD_SET_PICKER  = (                          # anchored off the label

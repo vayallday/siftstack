@@ -27,11 +27,13 @@ BROKEN_CSV = FIXTURES / "pr_export_broken.csv"
 
 def test_required_columns_set_includes_radar_id_and_address():
     # Minimum surface — if these drift, the parser will misalign data.
+    # Column names verified live 2026-05-23 against the actual "SiftStack
+    # Export" field set in PR (e.g., "Radar ID" with a space, not "RadarID").
     for col in (
-        "RadarID", "Address", "City", "State", "ZIP Code", "County",
-        "Assessed Owner", "Mailing Address", "Mailing City",
-        "Mailing State", "Mailing ZIP Code", "Estimated Value",
-        "Estimated Equity %", "Year Built",
+        "Radar ID", "Address", "City", "State", "ZIP", "County",
+        "Owner", "Mail Address", "Mail City",
+        "Mail State", "Mail ZIP", "Est Value",
+        "Est Equity %", "Yr Built",
     ):
         assert col in REQUIRED_PR_COLUMNS, f"missing required column: {col}"
 
@@ -211,7 +213,7 @@ def test_missing_required_column_raises_value_error_naming_column_and_field_set(
     with pytest.raises(ValueError) as exc_info:
         parse_pr_csv(BROKEN_CSV, notice_type="foreclosure")
     msg = str(exc_info.value)
-    assert "RadarID" in msg, f"error must name missing column: {msg}"
+    assert "Radar ID" in msg, f"error must name missing column: {msg}"
     assert "SiftStack Export" in msg, (
         f"error must point to the field set: {msg}"
     )

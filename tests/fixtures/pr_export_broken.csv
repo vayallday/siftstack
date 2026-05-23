@@ -1,2 +1,2 @@
-Address,City,State,ZIP Code,County,Assessed Owner,Primary Contact Full Name,Mailing Address,Mailing City,Mailing State,Mailing ZIP Code,Estimated Value,Estimated Equity %,Sale Date,Trustee,Default Amount,Owner Occupied,Year Built
+Address,City,State,ZIP,County,Owner,Primary Name,Mail Address,Mail City,Mail State,Mail ZIP,Est Value,Est Equity %,Orig Sale Date,Trustee,Default Amount,Owner Occupied,Yr Built
 222 Elm St,Richmond,VA,23220,Richmond City,"FAKE, OWNER","",222 Elm St,Richmond,VA,23220,100000,50,2026-06-15,Some Trustee,50000,Yes,1960

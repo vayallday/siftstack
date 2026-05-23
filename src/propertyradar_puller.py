@@ -16,6 +16,7 @@ from TN scraper state files.
 
 import asyncio
 import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -50,6 +51,7 @@ from propertyradar_config import (
     SEL_PR_DASHBOARD_SENTINEL,
     SEL_PR_DOWNLOAD_MODAL,
     SEL_PR_DOWNLOADS_AREA,
+    SEL_PR_EXPORT_CONTINUE,
     SEL_PR_EXPORT_CSV_RADIO,
     SEL_PR_EXPORT_DOWNLOAD,
     SEL_PR_EXPORT_MENU,
@@ -640,15 +642,27 @@ async def _export_delta(
 ) -> Path:
     """Run the PR export wizard end-to-end and return the downloaded CSV path.
 
-    The wizard order discovered in Plan 02-03 (single-page wizard, CSV in
-    post-Purchase modal) is the inverse of what the original plan assumed:
+    Wizard flow verified live 2026-05-23 against MD_Auction. The original
+    "single-page wizard" assumption documented in propertyradar_config.py
+    was wrong — the wizard is TWO steps:
 
-      Actions → Export to File → (wait for wizard) → open field-set picker
-      → click 'SiftStack Export' option → click Purchase (NOT Continue)
-      → wait for the 'Download Export' modal → click CSV radio label
-      → click Download.
+      Actions → Export to File
+      ↓
+      Wizard page 1 (field-set selection)
+        - open field-set combobox → click 'SiftStack Export' option
+        - click Continue   ← required; opens the confirmation page
+      ↓
+      Wizard page 2 (purchase confirmation)
+        - shows the cost summary + an 'Add to Balance' button (ignore)
+        - click Purchase   ← opens the Download modal
+      ↓
+      Download Export modal
+        - click 'Comma delimited' (CSV) radio label
+        - click Download   ← THIS is the quota-consuming action
 
-    Continue is never used in this flow.
+    Purchase does NOT consume the 10K-records-per-month quota by itself;
+    only the modal's Download click does (verified by memory
+    `propertyradar-purchase-not-billed`).
     """
     await _dismiss_pr_popups(page)
     await page.click(SEL_PR_EXPORT_MENU)
@@ -657,15 +671,20 @@ async def _export_delta(
     await asyncio.sleep(3)  # wizard render
     await _dismiss_pr_popups(page)
 
-    # Open the field-set picker and select PR_FIELD_SET_NAME.
+    # ── Wizard page 1: pick the saved field set, then click Continue ──
     await page.click(SEL_PR_FIELD_SET_PICKER)
     await asyncio.sleep(1)
     await page.click(SEL_PR_FIELD_SET_OPTION.replace("{name}", PR_FIELD_SET_NAME))
     await asyncio.sleep(1)
+    logger.info("Clicking Continue for list %s — advances to purchase page",
+                pr_list.name)
+    await page.click(SEL_PR_EXPORT_CONTINUE)
+    await asyncio.sleep(3)
+    await _dismiss_pr_popups(page)
 
-    # Click Purchase directly — the wizard's Continue button is unused.
-    # This opens the "Download Export" modal; quota is NOT consumed yet
-    # (it's consumed on the modal's Download click).
+    # ── Wizard page 2: confirm purchase ────────────────────────────────
+    # Purchase opens the Download modal; quota is NOT consumed yet (it's
+    # consumed on the modal's Download click).
     logger.info("Clicking Purchase for list %s — opens the Download Export modal",
                 pr_list.name)
     await page.click(SEL_PR_EXPORT_PURCHASE)
@@ -879,8 +898,11 @@ async def pull_all_lists(
     all_notices: list[NoticeData] = []
     quota_disaster = False
 
+    # Headless by default for unattended Apify runs; flip via PR_HEADLESS=0
+    # for local debugging so the operator can watch the wizard step through.
+    headless = os.environ.get("PR_HEADLESS", "1") != "0"
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(headless=headless)
         ctx = await browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "

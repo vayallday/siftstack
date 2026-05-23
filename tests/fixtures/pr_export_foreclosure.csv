@@ -1,4 +1,4 @@
-RadarID,Address,City,State,ZIP Code,County,Assessed Owner,Primary Contact Full Name,Mailing Address,Mailing City,Mailing State,Mailing ZIP Code,Estimated Value,Estimated Equity %,Sale Date,Trustee,Default Amount,Owner Occupied,Year Built
+Radar ID,Address,City,State,ZIP,County,Owner,Primary Name,Mail Address,Mail City,Mail State,Mail ZIP,Est Value,Est Equity %,Orig Sale Date,Trustee,Default Amount,Owner Occupied,Yr Built
 PR1000001,101 Maple Cove Ln,Richmond,VA,23220,Richmond City,"DOE, JANE A",Jane A Doe,101 Maple Cove Ln,Richmond,VA,23220,425000,62,2026-06-15,Substitute Trustee Services LLC,287500,Yes,1958
 PR1000002,2240 Oakridge Ter,Henrico,VA,23228,Henrico,"SMITH, JOHN R",John R Smith,PO Box 4488,Henrico,VA,23228,612000,48,2026-07-02,BWW Law Group LLC,341200,No,1972
 PR1000003,8801 Brookwood Dr,Chesterfield,VA,23832,Chesterfield,"GARCIA, MARIA",Maria Garcia,8801 Brookwood Dr,Chesterfield,VA,23832,389000,71,2026-06-28,Samuel I White PC,221000,Yes,1965

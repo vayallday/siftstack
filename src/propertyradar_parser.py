@@ -50,26 +50,40 @@ logger = logging.getLogger(__name__)
 # These columns MUST appear in every PR export. If any are missing the
 # "SiftStack Export" field set in the PR app has drifted and the parser
 # raises a clear ValueError instead of silently producing empty NoticeData.
+#
+# Column names verified live 2026-05-23 against the actual export from
+# MD_Auction. PR uses abbreviated headers — earlier assumed names like
+# "RadarID" / "Mailing Address" / "Estimated Value" don't exist; the
+# real headers are below.
 REQUIRED_PR_COLUMNS: set[str] = {
-    "RadarID",
+    "Radar ID",          # space — not "RadarID"
     "Address",
     "City",
     "State",
-    "ZIP Code",
+    "ZIP",               # not "ZIP Code"
     "County",
-    "Assessed Owner",
-    "Mailing Address",
-    "Mailing City",
-    "Mailing State",
-    "Mailing ZIP Code",
-    "Estimated Value",
-    "Estimated Equity %",
-    "Year Built",
+    "Owner",             # not "Assessed Owner"
+    "Mail Address",      # "Mail" — not "Mailing"
+    "Mail City",
+    "Mail State",
+    "Mail ZIP",
+    "Est Value",         # not "Estimated Value"
+    "Est Equity %",      # not "Estimated Equity %"
+    "Yr Built",          # not "Year Built"
 }
 
 
 # ── Date helpers ──────────────────────────────────────────────────
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# RadarID shape: 'P' followed by alphanumerics, no whitespace. Verified
+# live 2026-05-23 against MD_Auction (e.g. P9959E64, PDCF6328) and across
+# the synthetic test fixtures (PR1000001 style). The check exists to drop
+# PR's trailing license-disclaimer footer that DictReader maps into the
+# first column as text — that text starts with 'The information...'
+# and contains spaces, so the regex rejects it without being overly
+# specific about the exact RadarID character set.
+_RADAR_ID_RE = re.compile(r"^P[A-Z0-9]+$", re.IGNORECASE)
 
 
 def _parse_pr_date(value: str | None) -> str:
@@ -105,33 +119,34 @@ def _row_to_noticedata(row: dict, notice_type: str) -> NoticeData:
     Per DEC-pre-probate-owner-name: owner_name for pre_probate is the
     deceased property owner; deceased_indicator flags it for Phase 3.
 
-    Per RESEARCH §"Code Examples": owner_name prefers "Primary Contact
-    Full Name" (populated when PR enrichment ran on the list) and falls
-    back to "Assessed Owner" (always populated).
+    Owner-name resolution prefers "Primary Name" (populated when PR
+    enrichment ran on the list — the actual person to contact) and
+    falls back to "Owner" (always populated; the legal owner).
+    Auction date for foreclosure comes from "Orig Sale Date".
     """
     owner_name = (
-        (row.get("Primary Contact Full Name") or "").strip()
-        or (row.get("Assessed Owner") or "").strip()
+        (row.get("Primary Name") or "").strip()
+        or (row.get("Owner") or "").strip()
     )
 
     n = NoticeData(
         date_added=datetime.now().strftime("%Y-%m-%d"),
-        auction_date=_parse_pr_date(row.get("Sale Date", "")),
+        auction_date=_parse_pr_date(row.get("Orig Sale Date", "")),
         address=(row.get("Address") or "").strip(),
         city=(row.get("City") or "").strip(),
         state=(row.get("State") or "").strip(),
-        zip=(row.get("ZIP Code") or "").strip(),
+        zip=(row.get("ZIP") or "").strip(),
         owner_name=owner_name,
         notice_type=notice_type,
         county=(row.get("County") or "").strip(),
-        source_url=f"propertyradar://radarid/{(row.get('RadarID') or '').strip()}",
-        owner_street=(row.get("Mailing Address") or "").strip(),
-        owner_city=(row.get("Mailing City") or "").strip(),
-        owner_state=(row.get("Mailing State") or "").strip(),
-        owner_zip=(row.get("Mailing ZIP Code") or "").strip(),
-        estimated_value=(row.get("Estimated Value") or "").strip(),
-        equity_percent=(row.get("Estimated Equity %") or "").strip(),
-        year_built=(row.get("Year Built") or "").strip(),
+        source_url=f"propertyradar://radarid/{(row.get('Radar ID') or '').strip()}",
+        owner_street=(row.get("Mail Address") or "").strip(),
+        owner_city=(row.get("Mail City") or "").strip(),
+        owner_state=(row.get("Mail State") or "").strip(),
+        owner_zip=(row.get("Mail ZIP") or "").strip(),
+        estimated_value=(row.get("Est Value") or "").strip(),
+        equity_percent=(row.get("Est Equity %") or "").strip(),
+        year_built=(row.get("Yr Built") or "").strip(),
         raw_text="",  # PR has no notice body
     )
 
@@ -176,6 +191,15 @@ def parse_pr_csv(csv_path: str | Path, notice_type: str) -> list[NoticeData]:
                 f"set in the PropertyRadar app — it has drifted."
             )
         for row in reader:
+            # Skip the trailing license-disclaimer footer that PR appends
+            # to every export. DictReader maps its single cell into the
+            # first column, so we can't just check for empty — the value
+            # is the disclaimer text. Real RadarIDs match _RADAR_ID_RE.
+            rid = (row.get("Radar ID") or "").strip()
+            if not _RADAR_ID_RE.match(rid):
+                if rid:
+                    logger.debug("Skipping non-RadarID row: %r", rid[:80])
+                continue
             notices.append(_row_to_noticedata(row, notice_type=notice_type))
 
     logger.info(
