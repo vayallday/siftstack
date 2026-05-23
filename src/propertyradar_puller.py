@@ -31,13 +31,17 @@ from datasift_core import dismiss_popups
 from notice_parser import NoticeData
 from propertyradar_config import (
     JS_PR_GRID_STORE_COUNT,
-    JS_PR_GRID_STORE_RADARIDS,
+    JS_PR_GRID_STORE_RECORDS,
     JS_PR_TICK_USER_AGREEMENT,
+    LIFECYCLE_ACTIVE,
+    LIFECYCLE_EXITED,
+    LIFECYCLE_REENTERED,
     PR_BASE_URL,
     PR_COOKIES_FILE,
     PR_DAILY_DELTA_MAX_RECORDS,
     PR_FIELD_SET_NAME,
     PR_LOGIN_URL,
+    PR_STATE_SCHEMA_VERSION_V2,
     PROPERTYRADAR_EMAIL,
     PROPERTYRADAR_LISTS,
     PROPERTYRADAR_PASSWORD,
@@ -224,13 +228,10 @@ async def login(page: Page, _retries: int = 3) -> bool:
 
 # ── Membership scrape (the canonical delta source) ──────────────────
 
-async def _scrape_list_members(page: Page) -> list[str]:
-    """Scrape the set of RadarIDs currently in the open list view.
+async def _scroll_until_store_stable(page: Page) -> int | None:
+    """PageDown the buffered grid until the ExtJS Store count stops growing.
 
-    PR's grid is buffered/infinite-scroll (no Next button, no "1-20 of N"
-    element), so we PageDown until the ExtJS Store count stabilises, then
-    pull the full RadarID array from the Store. Bypasses the display:none
-    on the Radar ID column, which would block a DOM-cell scrape.
+    Returns the stable count, or `None` if no visible grid was found.
     """
     previous_count = -1
     stable_iterations = 0
@@ -239,21 +240,198 @@ async def _scrape_list_members(page: Page) -> list[str]:
         count = await page.evaluate(JS_PR_GRID_STORE_COUNT)
         if count is None:
             logger.warning("No visible grid found — store count is None")
-            return []
+            return None
         if count == previous_count:
             stable_iterations += 1
             if stable_iterations >= 2:
-                break
+                return count
         else:
             stable_iterations = 0
             previous_count = count
         await page.keyboard.press("PageDown")
         await asyncio.sleep(0.4)  # let the store fetch + render
+    return previous_count
 
-    radar_ids = await page.evaluate(JS_PR_GRID_STORE_RADARIDS)
-    if not radar_ids:
-        return []
-    return [str(rid) for rid in radar_ids if rid]
+
+async def _scrape_list_records(page: Page) -> dict[str, dict]:
+    """Scrape the full set of records (keyed by RadarID) from the open list view.
+
+    Returns a dict like:
+        {"P12345": {"Address": "...", "City": "...", ..., "Owner": "..."}, ...}
+
+    The full record (not just the RadarID) is needed so the puller can emit
+    synthetic exit/reentry NoticeData with the last-known address + owner
+    when a property leaves the list later. See JS_PR_GRID_STORE_RECORDS for
+    the exact field list — only essentials are persisted (full 250-field
+    records would bloat pr_state.json).
+    """
+    if await _scroll_until_store_stable(page) is None:
+        return {}
+    records = await page.evaluate(JS_PR_GRID_STORE_RECORDS)
+    if not records:
+        return {}
+    out: dict[str, dict] = {}
+    for r in records:
+        rid = r.get("RadarID")
+        if not rid:
+            continue
+        out[str(rid)] = {
+            k: v for k, v in r.items() if k != "RadarID"
+        }
+    return out
+
+
+# Back-compat thin wrapper — older callers / tests that just want RadarIDs.
+async def _scrape_list_members(page: Page) -> list[str]:
+    """Scrape the set of currently-loaded RadarIDs. Thin wrapper around
+    _scrape_list_records for callers that don't need the full records."""
+    records = await _scrape_list_records(page)
+    return sorted(records.keys())
+
+
+# ── Lifecycle (formerly plan 02-07, folded into the puller) ─────────
+
+def _migrate_list_registry_v1(legacy: list[str], today: str) -> dict[str, dict]:
+    """Migrate a v1 entry (list[RadarID]) to the v2 dict-of-records shape.
+
+    v1 had no per-RadarID metadata, so first_seen / last_seen default to
+    today and last-known data is empty. A subsequent scrape populates the
+    real values.
+    """
+    return {
+        str(rid): {
+            "first_seen": today,
+            "last_seen": today,
+            "exited_at": None,
+            "status": LIFECYCLE_ACTIVE,
+            "data": {},
+        }
+        for rid in legacy
+        if rid
+    }
+
+
+def _coerce_list_registry(entry, today: str) -> dict[str, dict]:
+    """Return a v2 registry dict whatever the on-disk shape was.
+
+    Accepts:
+      - list[RadarID]                 (v1 schema) — migrated to v2
+      - dict[RadarID, record-dict]    (v2 schema) — passed through
+      - None / anything else          → empty dict
+    """
+    if isinstance(entry, list):
+        return _migrate_list_registry_v1(entry, today)
+    if isinstance(entry, dict):
+        return entry
+    return {}
+
+
+def _build_lifecycle_notice(
+    pr_list: PropertyRadarList,
+    radar_id: str,
+    record: dict,
+    lifecycle: str,
+    today: str,
+) -> NoticeData:
+    """Synthesise a NoticeData from a registry record + lifecycle event.
+
+    `record["data"]` is whatever last-known fields the previous scrape
+    captured (Address/City/State/ZIP/Owner/County). Missing fields
+    degrade gracefully — the downstream pipeline tolerates empty strings.
+    """
+    data = record.get("data") or {}
+    return NoticeData(
+        date_added=today,
+        address=data.get("Address", ""),
+        city=data.get("City", ""),
+        state=data.get("State", "") or pr_list.state,
+        zip=data.get("ZIP", ""),
+        owner_name=data.get("Owner", ""),
+        notice_type=pr_list.notice_type,
+        county=data.get("County", ""),
+        source_url=f"propertyradar://radarid/{radar_id}",
+        pr_lifecycle=lifecycle,
+        pr_list_slug=pr_list.slug,
+        pr_lifecycle_date=today,
+    )
+
+
+def _compute_lifecycle(
+    pr_list: PropertyRadarList,
+    current_records: dict[str, dict],
+    previous_registry: dict[str, dict],
+    today: str,
+) -> tuple[dict[str, dict], list[NoticeData], list[NoticeData]]:
+    """Diff `current_records` against `previous_registry`; return the
+    next-run registry plus synthetic exit/reentry NoticeData lists.
+
+    Transitions:
+      active   → exited      (was active last run, missing this run)
+      exited   → reentered   (was exited, present again)
+      absent   → active      (brand-new RadarID — gets a real export, not a synthetic)
+      active   → active      (no change; last_seen bumped)
+      reentered→ active      (promoted on the next run after re-entry)
+    """
+    next_registry: dict[str, dict] = {}
+    exit_notices: list[NoticeData] = []
+    reentry_notices: list[NoticeData] = []
+
+    current_ids = set(current_records.keys())
+    prev_ids = set(previous_registry.keys())
+
+    for rid in current_ids:
+        prev = previous_registry.get(rid)
+        if prev is None:
+            # Brand-new — no synthetic, it'll flow through the regular export.
+            next_registry[rid] = {
+                "first_seen": today,
+                "last_seen": today,
+                "exited_at": None,
+                "status": LIFECYCLE_ACTIVE,
+                "data": current_records[rid],
+            }
+        elif prev.get("status") == LIFECYCLE_EXITED:
+            # Re-entry — was gone, back again.
+            next_registry[rid] = {
+                "first_seen": prev.get("first_seen") or today,
+                "last_seen": today,
+                "exited_at": None,
+                "status": LIFECYCLE_REENTERED,
+                "data": current_records[rid],
+            }
+            reentry_notices.append(_build_lifecycle_notice(
+                pr_list, rid, next_registry[rid], LIFECYCLE_REENTERED, today,
+            ))
+        else:
+            # Continuing presence — bump last_seen, refresh last-known data,
+            # promote `reentered → active` so the next run treats it normally.
+            next_registry[rid] = {
+                "first_seen": prev.get("first_seen") or today,
+                "last_seen": today,
+                "exited_at": None,
+                "status": LIFECYCLE_ACTIVE,
+                "data": current_records[rid],
+            }
+
+    for rid in prev_ids - current_ids:
+        prev = previous_registry[rid]
+        prev_status = prev.get("status", LIFECYCLE_ACTIVE)
+        if prev_status == LIFECYCLE_EXITED:
+            # Already exited and still missing — keep the record but don't
+            # emit a new notice (avoid duplicate `pr_exited_*` tags).
+            next_registry[rid] = prev
+        else:
+            # Newly exited.
+            next_registry[rid] = {
+                **prev,
+                "status": LIFECYCLE_EXITED,
+                "exited_at": today,
+            }
+            exit_notices.append(_build_lifecycle_notice(
+                pr_list, rid, next_registry[rid], LIFECYCLE_EXITED, today,
+            ))
+
+    return next_registry, exit_notices, reentry_notices
 
 
 # ── Quota guard ──────────────────────────────────────────────────────
@@ -356,23 +534,28 @@ async def _export_delta(
 async def run_list(
     page: Page,
     pr_list: PropertyRadarList,
-    previous_radar_ids: set[str],
+    previous_registry: dict[str, dict],
     download_dir: Path,
     today: str | None = None,
-) -> tuple[list[NoticeData], list[str]]:
-    """Process one list. Returns (notices, currently-seen-RadarIDs).
+) -> tuple[list[NoticeData], dict[str, dict]]:
+    """Process one list. Returns (notices, updated-registry).
+
+    `previous_registry` is the v2-shape entry for THIS list from the last
+    run — `{RadarID: {first_seen, last_seen, exited_at, status, data}}`.
+    The returned registry is the new baseline to persist for next run.
 
     Steps:
       1. Click into the list from the My Lists view.
-      2. Scrape the full current RadarID set via the ExtJS Store.
-      3. Diff against `previous_radar_ids` to find brand-new RadarIDs.
-      4. Quota guard on the delta (refuses huge "everything is new"
+      2. Scrape the FULL current record set via the ExtJS Store.
+      3. Compute lifecycle: brand-new IDs → delta to export;
+         disappeared IDs → synthetic `pr_exited_*` notices;
+         re-appearing previously-exited IDs → synthetic `pr_reentered_*`.
+      4. Quota guard on the brand-new delta (refuses huge "everything is new"
          scenarios that signal a stale state file).
       5. If delta is empty → skip the PR export entirely (saves quota).
-      6. Otherwise → run the export wizard, parse the CSV, local-filter
-         to the delta RadarIDs.
-      7. Return the parsed notices + the current RadarID set for the
-         caller to persist as next run's baseline.
+      6. Otherwise → run the export wizard, parse the CSV, local-filter to
+         the delta RadarIDs.
+      7. Return the regular new notices + exit + reentry synthetic notices.
     """
     today = today or datetime.now().strftime("%Y-%m-%d")
     logger.info("=== Starting list: %s ===", pr_list.name)
@@ -384,16 +567,24 @@ async def run_list(
     await asyncio.sleep(5)  # list view loads
     await _dismiss_pr_popups(page)
 
-    # 2. Scrape current RadarIDs (free — no quota).
-    current = await _scrape_list_members(page)
-    current_set = set(current)
-    logger.info("List %s currently has %d members", pr_list.name, len(current_set))
+    # 2. Scrape current records (free — no quota).
+    current_records = await _scrape_list_records(page)
+    current_ids = set(current_records.keys())
+    logger.info("List %s currently has %d members", pr_list.name, len(current_ids))
 
-    # 3. Diff against last-run baseline → brand-new RadarIDs.
-    delta = sorted(current_set - set(previous_radar_ids or set()))
-    logger.info("List %s: %d new RadarIDs (delta)", pr_list.name, len(delta))
+    # 3. Compute lifecycle.
+    new_registry, exit_notices, reentry_notices = _compute_lifecycle(
+        pr_list, current_records, previous_registry or {}, today,
+    )
+    # "Brand-new" = present in current scrape AND NOT in previous registry.
+    delta = sorted(current_ids - set(previous_registry or {}))
+    logger.info(
+        "List %s: %d new RadarIDs (delta), %d exits, %d re-entries",
+        pr_list.name, len(delta), len(exit_notices), len(reentry_notices),
+    )
 
-    # 4. Quota guard — may raise QuotaGuardError.
+    # 4. Quota guard — may raise QuotaGuardError. Only counts the brand-new
+    # delta (exits/reentries don't consume export quota, they're synthetic).
     await _quota_guard(pr_list, delta)
 
     new_notices: list[NoticeData] = []
@@ -402,9 +593,9 @@ async def run_list(
         csv_path = await _export_delta(page, pr_list, delta, download_dir)
         all_notices = parse_pr_csv(csv_path, notice_type=pr_list.notice_type)
 
-        # Local-filter the parsed CSV to ONLY the delta RadarIDs. PR exports
-        # the full list (no in-UI delta filter exists), so we filter here.
-        # The parser sets source_url = "propertyradar://radarid/{RadarID}".
+        # Local-filter the parsed CSV to ONLY the delta RadarIDs. PR exports the
+        # full list (no in-UI delta filter exists), so we filter here. The parser
+        # sets source_url = "propertyradar://radarid/{RadarID}" per RESEARCH A4.
         delta_set = set(delta)
         new_notices = [
             n for n in all_notices
@@ -418,7 +609,8 @@ async def run_list(
         logger.info("List %s: empty new-RadarID delta — skipping export (saves quota)",
                     pr_list.name)
 
-    return new_notices, sorted(current_set)
+    # 7. Combine regular notices with synthetic lifecycle notices.
+    return new_notices + exit_notices + reentry_notices, new_registry
 
 
 # ── Session-expiry recovery ──────────────────────────────────────────
@@ -501,18 +693,18 @@ async def pull_all_lists(
             logger.info("[%d/%d] Processing list: %s",
                         idx, len(lists), pr_list.name)
 
-            # Previous-run set for this list. Tolerates missing entries
-            # (first run) — first run sees the full list as "new", which
-            # is exactly when the quota guard earns its keep.
-            previous_radar_ids = set(pr_state.get(pr_list.name, []))
+            # Migrate v1 list-of-IDs (or accept v2 dict-of-records) → v2.
+            previous_registry = _coerce_list_registry(
+                pr_state.get(pr_list.name), today_iso,
+            )
             if not await _is_session_valid(page):
                 if not await _try_relogin(page):
                     logger.error("Cannot recover PR session — aborting remaining lists")
                     break
 
             try:
-                list_notices, current_radar_ids = await run_list(
-                    page, pr_list, previous_radar_ids, download_dir, today=today_iso,
+                list_notices, new_registry = await run_list(
+                    page, pr_list, previous_registry, download_dir, today=today_iso,
                 )
                 all_notices.extend(list_notices)
             except QuotaGuardError:
@@ -524,8 +716,8 @@ async def pull_all_lists(
                                  pr_list.name)
                 if await _try_relogin(page):
                     try:
-                        list_notices, current_radar_ids = await run_list(
-                            page, pr_list, previous_radar_ids, download_dir, today=today_iso,
+                        list_notices, new_registry = await run_list(
+                            page, pr_list, previous_registry, download_dir, today=today_iso,
                         )
                         all_notices.extend(list_notices)
                     except Exception:
@@ -535,9 +727,10 @@ async def pull_all_lists(
                 else:
                     continue
 
-            # Per-iteration persist — keep newly-confirmed baseline even if
-            # a later list's run blows up.
-            pr_state[pr_list.name] = current_radar_ids
+            # Per-iteration persist. Bump _schema_version to v2 so future
+            # readers know the per-RadarID dict shape (see _coerce_list_registry).
+            pr_state[pr_list.name] = new_registry
+            pr_state["_schema_version"] = PR_STATE_SCHEMA_VERSION_V2
             try:
                 save_pr_state(pr_state)
             except Exception:

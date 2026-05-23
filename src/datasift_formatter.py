@@ -280,6 +280,19 @@ def _build_tags(notice: NoticeData) -> str:
         except (ValueError, TypeError):
             pass
 
+    # PropertyRadar list-membership lifecycle (from puller's exit-detection
+    # fold). `pr_lifecycle` is "exited" or "reentered"; `pr_list_slug` is the
+    # PR list slug; `pr_lifecycle_date` is YYYY-MM-DD. The composite tag
+    # `pr_{lifecycle}_{slug}_{date}` lets DataSift filter presets find these
+    # records and a Sequence trigger can act on the lifecycle without us
+    # having to mutate property status here.
+    if notice.pr_lifecycle and notice.pr_list_slug:
+        date_part = notice.pr_lifecycle_date or ""
+        tag = f"pr_{notice.pr_lifecycle}_{notice.pr_list_slug}"
+        if date_part:
+            tag = f"{tag}_{date_part}"
+        tags.append(tag)
+
     # Deep prospecting tags
     if notice.decision_maker_status == "verified_living":
         tags.append("dm_verified")

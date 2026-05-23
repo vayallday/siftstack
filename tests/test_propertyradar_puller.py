@@ -122,27 +122,45 @@ async def test_quota_guard_raises_over_threshold(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_run_list_empty_delta_skips_export(monkeypatch, tmp_path):
-    """When current scrape matches previous baseline, no export runs and the
-    returned notices list is empty."""
+    """When current scrape matches previous registry, no export runs and the
+    returned notices list contains no real-acquisition NoticeData (and no
+    exit/reentry, since membership hasn't changed)."""
     page = MagicMock()
     page.click = AsyncMock()
     page.evaluate = AsyncMock()
     monkeypatch.setattr(pp, "_dismiss_pr_popups", AsyncMock())
+    # Post-fold: scrape returns records (dict keyed by RadarID), not just IDs.
     monkeypatch.setattr(
-        pp, "_scrape_list_members", AsyncMock(return_value=["1", "2", "3"]),
+        pp, "_scrape_list_records",
+        AsyncMock(return_value={
+            "1": {"Address": "1 Main St"},
+            "2": {"Address": "2 Main St"},
+            "3": {"Address": "3 Main St"},
+        }),
     )
     # _export_delta should NEVER be called
     ed = AsyncMock()
     monkeypatch.setattr(pp, "_export_delta", ed)
 
-    notices, current = await pp.run_list(
+    prev_registry = {
+        rid: {
+            "first_seen": "2026-05-22",
+            "last_seen": "2026-05-22",
+            "exited_at": None,
+            "status": "active",
+            "data": {"Address": f"{rid} Main St"},
+        }
+        for rid in ("1", "2", "3")
+    }
+    notices, new_registry = await pp.run_list(
         page,
         PropertyRadarList("L", "VA", "foreclosure", "L"),
-        previous_radar_ids={"1", "2", "3"},
+        previous_registry=prev_registry,
         download_dir=tmp_path,
     )
-    assert notices == []
-    assert set(current) == {"1", "2", "3"}
+    assert notices == []                       # no real export, no exits, no reentries
+    assert set(new_registry) == {"1", "2", "3"}  # all still active in registry
+    assert all(r["status"] == "active" for r in new_registry.values())
     ed.assert_not_called()
 
 
@@ -186,7 +204,9 @@ async def test_pull_all_lists_persists_state_after_each_success(monkeypatch, tmp
     async def fake_run_list(page, pr_list, prev, dd, today=None):
         if pr_list.slug == "fails":
             raise RuntimeError("simulated")
-        return [], ["A", "B"]
+        # Post-fold: returns (notices, new_registry) where the registry is a
+        # dict[str, dict] keyed by RadarID.
+        return [], {"A": {"status": "active"}, "B": {"status": "active"}}
 
     monkeypatch.setattr(pp, "run_list", fake_run_list)
     monkeypatch.setattr(pp, "_is_session_valid", AsyncMock(return_value=True))
@@ -216,7 +236,7 @@ async def test_pull_all_lists_aborts_on_quota_guard(monkeypatch, tmp_path):
         called.append(pr_list.slug)
         if pr_list.slug == "boom":
             raise pp.QuotaGuardError("simulated")
-        return [], []
+        return [], {}
 
     monkeypatch.setattr(pp, "run_list", fake_run_list)
     monkeypatch.setattr(pp, "_is_session_valid", AsyncMock(return_value=True))
@@ -232,6 +252,112 @@ async def test_pull_all_lists_aborts_on_quota_guard(monkeypatch, tmp_path):
     assert called == ["one", "boom"], (
         f"after quota-guard on list 2, list 3 must NOT run. called={called}"
     )
+
+
+# ── Lifecycle (formerly plan 02-07, folded into the puller) ──────
+
+def _active_record(rid: str, address: str = "X") -> dict:
+    return {
+        "first_seen": "2026-05-22",
+        "last_seen": "2026-05-22",
+        "exited_at": None,
+        "status": "active",
+        "data": {"Address": address},
+    }
+
+
+def test_compute_lifecycle_emits_exit_notices():
+    """Properties present last run but missing this run produce
+    `pr_lifecycle="exited"` synthetic NoticeData."""
+    pr_list = PropertyRadarList("L", "VA", "foreclosure", "vaslug")
+    prev = {"A": _active_record("A", "1 Main"), "B": _active_record("B", "2 Main")}
+    current_records = {"A": {"Address": "1 Main"}}  # B is gone
+    next_reg, exits, reentries = pp._compute_lifecycle(
+        pr_list, current_records, prev, today="2026-05-23",
+    )
+    assert [n.pr_lifecycle for n in exits] == ["exited"]
+    assert exits[0].pr_list_slug == "vaslug"
+    assert exits[0].pr_lifecycle_date == "2026-05-23"
+    assert exits[0].address == "2 Main"             # last-known data preserved
+    assert exits[0].source_url == "propertyradar://radarid/B"
+    assert next_reg["B"]["status"] == "exited"
+    assert next_reg["B"]["exited_at"] == "2026-05-23"
+    assert reentries == []
+
+
+def test_compute_lifecycle_emits_reentry_notices():
+    """A previously-exited RadarID reappearing produces a `pr_lifecycle=
+    "reentered"` synthetic, and the registry clears its `exited_at`."""
+    pr_list = PropertyRadarList("L", "VA", "foreclosure", "vaslug")
+    prev = {
+        "C": {
+            "first_seen": "2026-04-01",
+            "last_seen": "2026-05-10",
+            "exited_at": "2026-05-11",
+            "status": "exited",
+            "data": {"Address": "3 Oak"},
+        },
+    }
+    current_records = {"C": {"Address": "3 Oak"}}
+    next_reg, exits, reentries = pp._compute_lifecycle(
+        pr_list, current_records, prev, today="2026-05-23",
+    )
+    assert exits == []
+    assert [n.pr_lifecycle for n in reentries] == ["reentered"]
+    assert next_reg["C"]["status"] == "reentered"
+    assert next_reg["C"]["exited_at"] is None
+    assert next_reg["C"]["first_seen"] == "2026-04-01"  # original preserved
+
+
+def test_compute_lifecycle_idempotent_on_repeat_exit():
+    """Running twice with the same `prev` and an empty current must NOT
+    produce a second exit notice for the already-exited record."""
+    pr_list = PropertyRadarList("L", "VA", "foreclosure", "vaslug")
+    prev = {
+        "D": {
+            "first_seen": "2026-04-01",
+            "last_seen": "2026-05-22",
+            "exited_at": "2026-05-22",
+            "status": "exited",
+            "data": {"Address": "4 Pine"},
+        },
+    }
+    _, exits, reentries = pp._compute_lifecycle(
+        pr_list, current_records={}, previous_registry=prev, today="2026-05-23",
+    )
+    assert exits == [] and reentries == []
+
+
+def test_compute_lifecycle_first_run_has_no_synthetics():
+    """Empty registry first run: no exits, no reentries — all current
+    RadarIDs become brand-new (handled by the regular export path)."""
+    pr_list = PropertyRadarList("L", "VA", "foreclosure", "vaslug")
+    next_reg, exits, reentries = pp._compute_lifecycle(
+        pr_list,
+        current_records={"E": {"Address": "5 Elm"}, "F": {"Address": "6 Fir"}},
+        previous_registry={},
+        today="2026-05-23",
+    )
+    assert exits == [] and reentries == []
+    assert set(next_reg) == {"E", "F"}
+    assert all(r["status"] == "active" for r in next_reg.values())
+
+
+def test_coerce_list_registry_migrates_v1_list_of_ids():
+    """v1 state files stored `{list: [RadarID1, ...]}`. The coerce helper
+    migrates them to v2 dict shape with default metadata."""
+    legacy = ["G", "H"]
+    out = pp._coerce_list_registry(legacy, today="2026-05-23")
+    assert set(out) == {"G", "H"}
+    for rec in out.values():
+        assert rec["status"] == "active"
+        assert rec["first_seen"] == "2026-05-23"
+        assert rec["exited_at"] is None
+
+
+def test_coerce_list_registry_passes_through_v2_dict():
+    v2 = {"I": _active_record("I")}
+    assert pp._coerce_list_registry(v2, today="2026-05-23") is v2
 
 
 # ── _download_export: async-path TBD escalation ────────────────────

@@ -179,6 +179,44 @@ JS_PR_GRID_STORE_COUNT = """
 })()
 """
 
+# Used by the puller's exit-detection fold (formerly plan 02-07). Returns a
+# compact list of last-known property fields per loaded row, so the puller can
+# preserve enough metadata to emit synthetic exit/reentry NoticeData when a
+# property leaves the list later. Only the fields below are persisted — full
+# 250-field records would bloat pr_state.json.
+JS_PR_GRID_STORE_RECORDS = """
+(() => {
+    const grids = Ext.ComponentQuery.query('grid');
+    const g = grids.find(g => g.isVisible && g.isVisible());
+    if (!g) return null;
+    return g.getStore().getData().items.map(r => ({
+        RadarID:  String(r.data.RadarID ?? ''),
+        Address:  r.data.Address || '',
+        City:     r.data.City || '',
+        State:    r.data.State || '',
+        ZIP:      r.data.ZIP || '',
+        Owner:    r.data.Owner || '',
+        County:   r.data.County || '',
+    }));
+})()
+"""
+
+
+# ── Lifecycle state values for pr_state.json v2 schema ────────────
+# Each list member is tagged active / exited / reentered in the registry.
+# Transitions:
+#   absent → active           (first observation)
+#   active → exited           (was in last run, not in this run)
+#   exited → reentered        (was exited, observed again)
+#   reentered → active        (promoted on the NEXT run after re-entry)
+LIFECYCLE_ACTIVE    = "active"
+LIFECYCLE_EXITED    = "exited"
+LIFECYCLE_REENTERED = "reentered"
+
+# Bump when the on-disk schema changes shape. v1 = list[RadarID]. v2 = dict
+# keyed by RadarID with {first_seen, last_seen, exited_at, status, data}.
+PR_STATE_SCHEMA_VERSION_V2 = 2
+
 
 # ── Export configuration ───────────────────────────────────────────
 # The PR-side field set the puller picks in the export wizard. Must

@@ -132,6 +132,12 @@ class NoticeData:
     email_5: str = ""
     # Pipeline metadata (set by enrichment_pipeline)
     run_id: str = ""                   # Unique pipeline run identifier for data lineage
+    # PropertyRadar list-membership lifecycle (set by propertyradar_puller's
+    # exit-detection fold — synthetic notices for properties that LEFT a PR
+    # list, or RETURNED after a prior exit).
+    pr_lifecycle: str = ""             # "exited" | "reentered" | "" (empty for normal records)
+    pr_list_slug: str = ""             # Slug of the PR list that triggered the lifecycle event
+    pr_lifecycle_date: str = ""        # YYYY-MM-DD when the event was detected
 
 
 # ── Known TN cities in Knox & Blount counties ─────────────────────────
