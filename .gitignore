@@ -9,6 +9,10 @@ seen_ids.json
 captcha_failed_ids.json
 .ancestry_page_loads.json
 cookies.json
+pr_state.json
+pr_cookies.json
+pr_membership.json
+pr_quota.json
 datasift_cookies.json
 dropbox_state.json
 photo_state.json
