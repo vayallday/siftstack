@@ -167,7 +167,20 @@ JS_PR_GRID_STORE_RADARIDS = """
     const grids = Ext.ComponentQuery.query('grid');
     const g = grids.find(g => g.isVisible && g.isVisible());
     if (!g) return null;
-    return g.getStore().getData().items.map(r => r.data.RadarID);
+    // PR's grid is backed by an Ext.data.BufferedStore (PageMap-based).
+    // Diagnostic-verified on 2026-05-23:
+    //   store.getRange()                 → THROWS on buffered store
+    //   store.data.items                 → undefined (PageMap has no items)
+    //   store.getRange(0, count-1)       → returns full Array of records
+    //   store.getAt(0).data.RadarID      → 'P9959E64' (real ID format)
+    // Ext auto-loads any missing pages during getRange(0, count-1).
+    const store = g.getStore();
+    const count = store.getCount();
+    if (!count) return [];
+    const records = store.getRange(0, count - 1);
+    return records
+        .filter(r => r && r.data && r.data.RadarID)
+        .map(r => r.data.RadarID);
 })()
 """
 
@@ -189,15 +202,22 @@ JS_PR_GRID_STORE_RECORDS = """
     const grids = Ext.ComponentQuery.query('grid');
     const g = grids.find(g => g.isVisible && g.isVisible());
     if (!g) return null;
-    return g.getStore().getData().items.map(r => ({
-        RadarID:  String(r.data.RadarID ?? ''),
-        Address:  r.data.Address || '',
-        City:     r.data.City || '',
-        State:    r.data.State || '',
-        ZIP:      r.data.ZIP || '',
-        Owner:    r.data.Owner || '',
-        County:   r.data.County || '',
-    }));
+    // See JS_PR_GRID_STORE_RADARIDS for the BufferedStore PageMap details.
+    const store = g.getStore();
+    const count = store.getCount();
+    if (!count) return [];
+    const records = store.getRange(0, count - 1);
+    return records
+        .filter(r => r && r.data && r.data.RadarID)
+        .map(r => ({
+            RadarID:  String(r.data.RadarID),
+            Address:  r.data.Address || '',
+            City:     r.data.City || '',
+            State:    r.data.State || '',
+            ZIP:      r.data.ZIP || '',
+            Owner:    r.data.Owner || '',
+            County:   r.data.County || '',
+        }));
 })()
 """
 
