@@ -362,14 +362,17 @@ def load_pr_state() -> dict[str, str]:
     return config.load_state(PR_STATE_FILE)
 
 
-def save_pr_state(state: dict[str, str]) -> None:
-    """Persist per-list last_seen state atomically. Stamps schema version.
+def save_pr_state(state: dict) -> None:
+    """Persist per-list state atomically. Preserves the caller's schema
+    version (the puller writes v2 via PR_STATE_SCHEMA_VERSION_V2; older
+    callers that don't stamp one fall through to v1 for back-compat).
 
-    Delegates to config.save_state (tmp -> rename + .bak backup) so PR state
-    gets the same crash-safe write semantics as TN's last_run.json.
+    Delegates to config.save_state (tmp -> rename + .bak backup) so PR
+    state gets the same crash-safe write semantics as TN's last_run.json.
     """
-    # Stamp the schema version on every save so a later schema bump is
-    # detectable by readers without breaking older files.
     state = dict(state)  # defensive copy — don't mutate caller's dict
-    state["_schema_version"] = PR_STATE_SCHEMA_VERSION
+    # Don't overwrite a caller-supplied schema version (v2 puller writes
+    # the dict-of-records shape and stamps v2 itself). Only stamp v1 as
+    # a fallback for callers that didn't set one.
+    state.setdefault("_schema_version", PR_STATE_SCHEMA_VERSION)
     config.save_state(PR_STATE_FILE, state)
