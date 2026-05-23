@@ -2077,6 +2077,14 @@ def enrich_obituary_data(
         if n.notice_type == "probate" and n.decedent_name.strip():
             raw_name = n.decedent_name.strip()
             is_tax_name = False  # decedent_name is "First Last" format
+        # Pre-probate (PropertyRadar): owner_name IS the deceased property
+        # owner — no executor named, no court filing. Explicit branch so the
+        # routing doesn't depend on falling through tax_owner_name when PR
+        # leaves that field empty. See deceased_indicator="pr_pre_probate"
+        # set by propertyradar_parser._row_to_noticedata.
+        elif n.notice_type == "pre_probate" and n.owner_name.strip():
+            raw_name = n.owner_name.strip()
+            is_tax_name = False  # PR's Owner field is "First Last" format
         elif n.tax_owner_name.strip():
             raw_name = n.tax_owner_name.strip()
             is_tax_name = True
@@ -2087,8 +2095,13 @@ def enrich_obituary_data(
             continue
         if _BUSINESS_RE.search(raw_name):
             continue
-        # Probate notice is proof of death — set regardless of obituary search
+        # Probate notice is proof of death — set regardless of obituary search.
+        # Pre-probate is ALSO proof of death (PR's deceased-owner signal lives
+        # in the property record itself), so promote owner_deceased upfront —
+        # the obituary search only fills in DOD / heir map / DM address.
         if n.notice_type == "probate" and n.decedent_name.strip():
+            n.owner_deceased = "yes"
+        elif n.notice_type == "pre_probate" and n.owner_name.strip():
             n.owner_deceased = "yes"
         candidates.append((n, raw_name, is_tax_name))
 
