@@ -35,7 +35,12 @@ class NoticeData:
     state: str = "TN"
     zip: str = ""
     owner_name: str = ""
-    notice_type: str = ""      # foreclosure | tax_sale | tax_lien | probate
+    notice_type: str = ""      # foreclosure | tax_sale | tax_delinquent |
+                               # probate | pre_probate | eviction |
+                               # code_violation | divorce
+                               # (8 total — pre_probate is PropertyRadar-only,
+                               # property-records deceased signal with no
+                               # court filing; see CLAUDE.md)
     county: str = ""
     source_url: str = ""
     raw_text: str = ""         # Full notice text for classification

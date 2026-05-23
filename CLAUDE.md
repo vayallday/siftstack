@@ -153,11 +153,12 @@ apify push
 
 Courthouse terminal photos → OCR → LLM parse → enrichment → DataSift. Runner takes phone photos at county courthouse terminals, uploads to Dropbox organized as `{county}/{notice_type}/`, system auto-processes. The OCR + parse layer is state-agnostic; only the obituary enricher's domain whitelist and the address standardizer's default state would need to be retargeted for non-TN courts.
 
-### Notice Types (7 total)
-- `foreclosure`, `tax_sale`, `tax_delinquent`, `probate` — existing from web scraper
+### Notice Types (8 total)
+- `foreclosure`, `tax_sale`, `tax_delinquent`, `probate` — court-filed (originally from TN web scraper; foreclosure now also from PropertyRadar for VA/MD)
 - `eviction` — plaintiff = landlord (target contact), defendant = tenant
 - `code_violation` — owner of record, violation type, compliance deadline
 - `divorce` — petitioner + respondent, property from schedule page
+- `pre_probate` — **PropertyRadar-only**, property-records deceased signal (owner is dead per assessor data; no executor named, no court filing). Distinct from `probate` because DM identification depends on obituary search rather than a named PR/executor on the filing. `owner_deceased="yes"` is set upfront so a failed obituary lookup still tags the record correctly.
 
 ### Critical OCR Patterns (hard-won from live testing)
 
@@ -384,7 +385,7 @@ These values are identical across all skills that reference them:
 - **Comp adjustments:** Bedroom $5,000, Bathroom $7,500, $/sqft $85, Age $500/yr (from `comp_analyzer.py`)
 - **Financing defaults:** HML 12%, conventional 7%, 2 points, 2.5% closing (from `deal_analyzer.py`)
 - **DOD sanity:** MAX_DOD_GAP_YEARS = 3 (from `obituary_enricher.py`)
-- **Notice types:** 7 total (foreclosure, tax_sale, tax_delinquent, probate, eviction, code_violation, divorce)
+- **Notice types:** 8 total (foreclosure, tax_sale, tax_delinquent, probate, pre_probate, eviction, code_violation, divorce)
 
 ### Key Corrections Made During Optimization (April 2026)
 - **Hardcoded credentials removed** from sift-market-research (had email/password in SKILL.md)

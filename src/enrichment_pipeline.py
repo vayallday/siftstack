@@ -632,3 +632,17 @@ def _log_summary(notices: list[NoticeData], opts: PipelineOptions) -> None:
             probate_with_addr,
             probate_total,
         )
+
+    # Pre-probate (PropertyRadar deceased-owner signal — no court filing)
+    pre_probate_total = sum(1 for n in notices if n.notice_type == "pre_probate")
+    if pre_probate_total:
+        pre_probate_deceased = sum(
+            1
+            for n in notices
+            if n.notice_type == "pre_probate" and n.owner_deceased == "yes"
+        )
+        logger.info(
+            "  Pre-probate confirmed deceased: %d/%d",
+            pre_probate_deceased,
+            pre_probate_total,
+        )
