@@ -2,7 +2,7 @@
 
 Runs as either:
   - Apify Actor (when APIFY_IS_AT_HOME is set — reads input from Actor.get_input())
-  - Standalone CLI (python src/main.py daily --counties Knox --types foreclosure)
+  - Standalone CLI (python src/main.py daily)
 """
 
 import argparse
@@ -16,51 +16,23 @@ from pathlib import Path
 import config
 from config import (
     LOG_DIR,
-    NOTICE_TYPES,
     OUTPUT_DIR,
-    SAVED_SEARCHES,
-    SavedSearch,
 )
-from data_formatter import deduplicate, write_csv, write_csv_by_type
-from scraper import scrape_all
+from data_formatter import write_csv, write_csv_by_type
 
 logger = logging.getLogger(__name__)
-
-
-# ── Shared helpers ────────────────────────────────────────────────────
-
-
-def _filter_searches(
-    counties: list[str] | None,
-    types: list[str] | None,
-) -> list[SavedSearch]:
-    """Filter SAVED_SEARCHES by county and/or notice type."""
-    searches = list(SAVED_SEARCHES)
-
-    if counties:
-        county_set = {c.lower() for c in counties}
-        searches = [s for s in searches if s.county.lower() in county_set]
-
-    if types:
-        type_set = {t.lower() for t in types}
-        searches = [s for s in searches if s.notice_type.lower() in type_set]
-
-    return searches
 
 
 # ── Preflight health checks ─────────────────────────────────────────
 
 
-def _preflight_check(mode: str, source: str | None = None) -> list[str]:
+def _preflight_check(mode: str) -> list[str]:
     """Verify required API keys and service connectivity before running.
 
     Returns a list of failure descriptions. Empty list = all checks passed.
 
-    `source` selects which scrape acquisition source's credentials get
-    checked. Only meaningful when `mode in {"daily", "historical"}`:
-      - None / "tnpn" (default): check TNPN + CAPTCHA (existing TN scraper).
-      - "propertyradar": check PROPERTYRADAR_* only; skip CAPTCHA / TN
-        connectivity (PR puller doesn't use either).
+    The daily/historical acquisition path is always PropertyRadar now —
+    the TN public-notice scraper was archived to ``src/_legacy_tn/``.
     """
     failures: list[str] = []
 
@@ -69,25 +41,15 @@ def _preflight_check(mode: str, source: str | None = None) -> list[str]:
     enrichment_modes = scrape_modes | {"pdf-import", "photo-import", "dropbox-watch", "csv-import"}
     datasift_modes = {"manage-presets", "manage-sold", "phone-validate"}
 
-    effective_source = (source or "tnpn").lower()
-
     if mode in scrape_modes:
-        if effective_source == "propertyradar":
-            # Lazy import — keeps the TN path importable even if Plan 02's
-            # propertyradar_config has a transient issue.
-            from propertyradar_config import (
-                PROPERTYRADAR_EMAIL, PROPERTYRADAR_PASSWORD,
+        from propertyradar_config import (
+            PROPERTYRADAR_EMAIL, PROPERTYRADAR_PASSWORD,
+        )
+        if not PROPERTYRADAR_EMAIL or not PROPERTYRADAR_PASSWORD:
+            failures.append(
+                "PROPERTYRADAR_EMAIL / PROPERTYRADAR_PASSWORD not set "
+                "(required for daily/historical PropertyRadar pulls)"
             )
-            if not PROPERTYRADAR_EMAIL or not PROPERTYRADAR_PASSWORD:
-                failures.append(
-                    "PROPERTYRADAR_EMAIL / PROPERTYRADAR_PASSWORD not set "
-                    "(required for --source propertyradar)"
-                )
-        else:
-            if not config.TNPN_EMAIL or not config.TNPN_PASSWORD:
-                failures.append("TNPN_EMAIL / TNPN_PASSWORD not set (required for TN scraping)")
-            if not config.CAPTCHA_API_KEY:
-                failures.append("CAPTCHA_API_KEY not set (CAPTCHA solving will fail)")
 
     if mode in enrichment_modes:
         # These are warnings, not blockers — pipeline degrades gracefully
@@ -109,39 +71,6 @@ def _preflight_check(mode: str, source: str | None = None) -> list[str]:
     if mode == "phone-validate":
         if not config.TRESTLE_API_KEY:
             failures.append("TRESTLE_API_KEY not set (required for phone validation)")
-
-    # ── Connectivity checks (only for TN scrape modes) ─────────────
-    # PR puller doesn't hit tnpublicnotice.com; PR's own connectivity is
-    # checked implicitly by the puller's login retry loop.
-    if mode in scrape_modes and effective_source == "tnpn":
-        import requests as _requests
-        try:
-            resp = _requests.head(config.BASE_URL, timeout=10, allow_redirects=True)
-            if resp.status_code >= 500:
-                failures.append(f"tnpublicnotice.com returned {resp.status_code} — site may be down")
-        except Exception as e:
-            failures.append(f"Cannot reach tnpublicnotice.com: {e}")
-
-    # ── 2Captcha balance check (TN only — PR puller doesn't use 2Captcha) ─
-    if mode in scrape_modes and effective_source == "tnpn" and config.CAPTCHA_API_KEY:
-        import requests as _requests
-        try:
-            resp = _requests.get(
-                f"https://2captcha.com/res.php?key={config.CAPTCHA_API_KEY}&action=getbalance",
-                timeout=10,
-            )
-            balance_text = resp.text.strip()
-            try:
-                balance = float(balance_text)
-                if balance < 0.50:
-                    failures.append(f"2Captcha balance too low: ${balance:.2f} (need at least $0.50)")
-                else:
-                    logger.info("Preflight: 2Captcha balance: $%.2f", balance)
-            except ValueError:
-                if "ERROR" in balance_text:
-                    failures.append(f"2Captcha API key invalid: {balance_text}")
-        except Exception as e:
-            logger.warning("Preflight: Could not check 2Captcha balance: %s", e)
 
     return failures
 
@@ -171,9 +100,6 @@ async def actor_main() -> None:
         # Set both config.* AND os.environ so downstream modules that read
         # from either source (e.g., datasift_uploader uses os.environ) pick them up.
         _cred_map = {
-            "TNPN_EMAIL": actor_input.get("tn_username", ""),
-            "TNPN_PASSWORD": actor_input.get("tn_password", ""),
-            "CAPTCHA_API_KEY": actor_input.get("captcha_api_key", ""),
             "ANTHROPIC_API_KEY": actor_input.get("anthropic_api_key", ""),
             "SMARTY_AUTH_ID": actor_input.get("smarty_auth_id", ""),
             "SMARTY_AUTH_TOKEN": actor_input.get("smarty_auth_token", ""),
@@ -194,10 +120,6 @@ async def actor_main() -> None:
                 os.environ[key] = val
 
         mode = actor_input.get("mode", "daily")
-        counties = actor_input.get("counties") or None
-        types = actor_input.get("types") or None
-        since_date_override = actor_input.get("since_date", "").strip()
-        start_page = int(actor_input.get("start_page", 1) or 1)
         drive_folder_id = actor_input.get("google_drive_folder_id", "")
         drive_key_b64 = actor_input.get("google_service_account_key", "")
 
@@ -210,105 +132,20 @@ async def actor_main() -> None:
         include_commercial = actor_input.get("include_commercial", False)
         include_entities = actor_input.get("include_entities", False)
 
-        # Validate
-        if not config.TNPN_EMAIL or not config.TNPN_PASSWORD:
-            Actor.log.error("tn_username and tn_password are required")
+        # Validate PropertyRadar credentials (the sole daily/historical source).
+        from propertyradar_config import (
+            PROPERTYRADAR_EMAIL as _PR_EMAIL,
+            PROPERTYRADAR_PASSWORD as _PR_PASS,
+        )
+        if not _PR_EMAIL or not _PR_PASS:
+            Actor.log.error("pr_username and pr_password are required")
             try:
                 from slack_notifier import notify_preflight_failure
-                notify_preflight_failure(["TNPN credentials missing"])
+                notify_preflight_failure(["PropertyRadar credentials missing"])
             except Exception:
                 pass
-            await Actor.fail(status_message="Missing SiftStack credentials")
+            await Actor.fail(status_message="Missing PropertyRadar credentials")
             return
-        if not config.CAPTCHA_API_KEY:
-            Actor.log.warning("captcha_api_key not set — CAPTCHA solving will fail")
-
-        # Filter searches
-        searches = _filter_searches(counties, types)
-        if not searches:
-            Actor.log.error("No saved searches match the given counties/types filters")
-            await Actor.fail(status_message="No matching saved searches")
-            return
-
-        Actor.log.info(
-            "Running %d saved searches: %s",
-            len(searches),
-            ", ".join(s.saved_search_name for s in searches),
-        )
-
-        # Set up residential proxy if requested
-        proxy_url: str | None = None
-        use_proxy = actor_input.get("use_residential_proxy", True)
-        if use_proxy:
-            try:
-                proxy_config = await Actor.create_proxy_configuration(
-                    groups=["RESIDENTIAL"]
-                )
-                proxy_url = await proxy_config.new_url()
-                Actor.log.info("Residential proxy configured")
-            except Exception:
-                Actor.log.warning("Could not configure residential proxy — running without proxy")
-
-        # Track seen notice IDs for incremental dedup
-        seen_ids: set[str] = set()
-
-        def _notice_id(url: str) -> str:
-            import re
-            m = re.search(r"[?&]ID=(\d+)", url)
-            return m.group(1) if m else ""
-
-        async def push_batch(batch_notices):
-            """Push new unique notices to dataset immediately after each search."""
-            unique = []
-            for n in batch_notices:
-                nid = _notice_id(n.source_url)
-                if nid and nid in seen_ids:
-                    continue
-                if nid:
-                    seen_ids.add(nid)
-                unique.append(n)
-            if unique:
-                await Actor.push_data([
-                    {
-                        "date_added": n.date_added,
-                        "address": n.address,
-                        "city": n.city,
-                        "state": n.state,
-                        "zip": n.zip,
-                        "owner_name": n.owner_name,
-                        "notice_type": n.notice_type,
-                        "county": n.county,
-                        "decedent_name": n.decedent_name,
-                        "owner_street": n.owner_street,
-                        "owner_city": n.owner_city,
-                        "owner_state": n.owner_state,
-                        "owner_zip": n.owner_zip,
-                        "auction_date": n.auction_date,
-                        "zip_plus4": n.zip_plus4,
-                        "latitude": n.latitude,
-                        "longitude": n.longitude,
-                        "dpv_match_code": n.dpv_match_code,
-                        "vacant": n.vacant,
-                        "rdi": n.rdi,
-                        "mls_status": n.mls_status,
-                        "mls_listing_price": n.mls_listing_price,
-                        "mls_last_sold_date": n.mls_last_sold_date,
-                        "mls_last_sold_price": n.mls_last_sold_price,
-                        "estimated_value": n.estimated_value,
-                        "estimated_equity": n.estimated_equity,
-                        "equity_percent": n.equity_percent,
-                        "property_type": n.property_type,
-                        "bedrooms": n.bedrooms,
-                        "bathrooms": n.bathrooms,
-                        "sqft": n.sqft,
-                        "year_built": n.year_built,
-                        "lot_size": n.lot_size,
-                        "source_url": n.source_url,
-                        "raw_text": n.raw_text[:5000] if n.raw_text else "",
-                    }
-                    for n in unique
-                ])
-                Actor.log.info("Pushed %d records to dataset (incremental)", len(unique))
 
         # Log LLM parser status
         if config.ANTHROPIC_API_KEY:
@@ -316,67 +153,18 @@ async def actor_main() -> None:
         else:
             Actor.log.info("LLM fallback disabled — set anthropic_api_key to enable")
 
-        if start_page > 1:
-            Actor.log.info("Starting from page %d (skipping earlier pages)", start_page)
-
         try:
             kvs = await Actor.open_key_value_store()
 
-            # ── Load last_run_date from Apify KVS (persists between runs) ──
-            if mode == "daily" and not since_date_override:
-                stored = await kvs.get_value("last_run_date")
-                if stored:
-                    since_date_override = stored
-                    Actor.log.info("Daily mode: using stored last_run_date = %s", stored)
-                else:
-                    Actor.log.info("Daily mode: no stored last_run_date, defaulting to 7 days")
-
-            # ── Load cross-run seen-ID cache from KVS (makes daily re-runs idempotent) ──
-            seen_ids = await kvs.get_value("seen_notice_ids") or {}
-            Actor.log.info("Loaded %d previously-seen notice IDs from KVS", len(seen_ids))
-
-            async def persist_seen_ids(ids: dict) -> None:
-                """Mid-run persistence — if a later search crashes, progress is kept."""
-                try:
-                    await kvs.set_value("seen_notice_ids", ids)
-                    await kvs.set_value(
-                        "last_run_date",
-                        datetime.now().strftime("%Y-%m-%d"),
-                    )
-                except Exception as e:
-                    Actor.log.warning("Failed to persist seen_notice_ids to KVS: %s", e)
-
-            # ── Scrape — dispatch on `source` ─────────────────────────
-            # PR puller's signature is `pull_all_lists(lists=None, download_dir=None)`
-            # — no `mode` or `since_date_override` (PR has no Added-Date filter;
-            # delta is membership-diff per plan 02-04 SUMMARY).
-            source = (actor_input.get("source", "tnpn") or "tnpn").lower()
-            if source == "propertyradar":
-                from propertyradar_puller import pull_all_lists
-                Actor.log.info("Running PropertyRadar puller (source=propertyradar)")
-                notices = await pull_all_lists(
-                    download_dir=config.OUTPUT_DIR,
-                )
-            else:
-                notices = await scrape_all(
-                    mode=mode, searches=searches, proxy_url=proxy_url, on_batch=push_batch,
-                    since_date_override=since_date_override or None,
-                    llm_api_key=config.ANTHROPIC_API_KEY or None,
-                    start_page=start_page,
-                    seen_ids=seen_ids,
-                    on_search_complete=persist_seen_ids,
-                )
-            # Handle async probate lookup before pipeline (requires await)
-            probate_notices = [n for n in notices if n.notice_type == "probate" and n.decedent_name and not n.address]
-            if probate_notices:
-                try:
-                    from property_lookup import lookup_decedent_properties
-                    Actor.log.info("Looking up property addresses for %d probate notices...", len(probate_notices))
-                    await lookup_decedent_properties(probate_notices)
-                except ImportError:
-                    Actor.log.warning("property_lookup module not found -- skipping property lookup")
-                except Exception as e:
-                    Actor.log.warning("Property lookup failed: %s -- continuing without lookups", e)
+            # ── Acquisition: PropertyRadar puller ─────────────────────
+            # PR has no Added-Date filter; delta is a membership-set diff
+            # against pr_state.json (see plan 02-04 SUMMARY). `mode` is
+            # accepted only for back-compat — PR ignores it.
+            from propertyradar_puller import pull_all_lists
+            Actor.log.info("Running PropertyRadar puller (mode=%s)", mode)
+            notices = await pull_all_lists(
+                download_dir=config.OUTPUT_DIR,
+            )
 
             # ── Enrichment ────────────────────────────────────────────
             from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline
@@ -560,15 +348,12 @@ async def actor_main() -> None:
 
                     # PR-09: append the monthly PropertyRadar quota line so the
                     # operator sees consumed/budget at a glance after every run.
-                    # Only meaningful when --source propertyradar; the function
-                    # reads pr_quota.json which only PR runs ever write to.
-                    if source == "propertyradar":
-                        try:
-                            from propertyradar_quota import format_quota_summary
-                            _send_webhook(format_quota_summary())
-                        except Exception as quota_exc:
-                            Actor.log.debug("Could not append PR quota summary: %s",
-                                            quota_exc, exc_info=True)
+                    try:
+                        from propertyradar_quota import format_quota_summary
+                        _send_webhook(format_quota_summary())
+                    except Exception as quota_exc:
+                        Actor.log.debug("Could not append PR quota summary: %s",
+                                        quota_exc, exc_info=True)
 
                     # Send DataSift CSV download links as a follow-up message
                     if datasift_csv_urls:
@@ -594,13 +379,11 @@ async def actor_main() -> None:
                 except Exception as e:
                     Actor.log.warning("Slack notification failed: %s", e)
 
-            # ── Save last_run_date + seen_notice_ids to Apify KVS for next run ─────
+            # ── Save last_run_date to Apify KVS for next run ─────
+            # (PropertyRadar dedup is driven by pr_state.json — written by
+            # the puller itself — not by a notice-ID cache.)
             await kvs.set_value("last_run_date", datetime.now().strftime("%Y-%m-%d"))
-            await kvs.set_value("seen_notice_ids", seen_ids)
-            Actor.log.info(
-                "Saved last_run_date + %d seen_notice_ids to KVS for next daily run",
-                len(seen_ids),
-            )
+            Actor.log.info("Saved last_run_date to KVS for next daily run")
 
             Actor.log.info("Done — %d notices exported (%.1f min)", total, elapsed_min)
 
@@ -658,7 +441,7 @@ def _run_pdf_import(args) -> None:
         logging.error("PDF file not found: %s", pdf_path)
         sys.exit(1)
 
-    county = args.pdf_county.strip().title()  # "knox" → "Knox"
+    county = args.pdf_county.strip().title()
 
     api_key = config.ANTHROPIC_API_KEY or None
 
@@ -1034,7 +817,7 @@ def _run_manage_sold(args) -> None:
     """Run the SiftMap sold properties management workflow."""
     from datasift_uploader import run_manage_sold_workflow
 
-    # Parse counties if provided, otherwise use default (Knox, Blount)
+    # Parse counties if provided, otherwise let downstream pick the default.
     counties = None
     if args.counties and args.counties.lower() != "all":
         counties = [c.strip().title() for c in args.counties.split(",")]
@@ -1085,7 +868,7 @@ def cli_main() -> None:
         "--counties",
         type=str,
         default=None,
-        help='Comma-separated counties to scrape (e.g. "Knox,Blount" or "all")',
+        help='Comma-separated county filter (no-op for PropertyRadar — list registry handles scoping)',
     )
     parser.add_argument(
         "--types",
@@ -1115,18 +898,6 @@ def cli_main() -> None:
         action="store_true",
         help="Enable debug logging",
     )
-    parser.add_argument(
-        "--source",
-        type=str,
-        choices=["tnpn", "propertyradar"],
-        default=None,
-        help=(
-            "Acquisition source for daily/historical mode. "
-            "Default: tnpn (existing TN public-notice scraper). "
-            "propertyradar: pull from configured PR lists via Playwright (VA/MD markets)."
-        ),
-    )
-
     # PDF import arguments
     parser.add_argument(
         "--pdf-path",
@@ -1138,7 +909,7 @@ def cli_main() -> None:
         "--pdf-county",
         type=str,
         default=None,
-        help='County name for PDF import, e.g. "Knox" (required for pdf-import mode)',
+        help='County name for PDF import, e.g. "Henrico" (required for pdf-import mode)',
     )
     parser.add_argument(
         "--pdf-date",
@@ -1163,7 +934,7 @@ def cli_main() -> None:
         type=str,
         default=None,
         dest="photo_county",
-        help='County name for photo import, e.g. "Knox" (required for photo-import mode)',
+        help='County name for photo import, e.g. "Henrico" (required for photo-import mode)',
     )
     parser.add_argument(
         "--photo-type",
@@ -1216,7 +987,7 @@ def cli_main() -> None:
         "--csv-county",
         type=str,
         default=None,
-        help='County name for CSV import, e.g. "Knox" (sets county for records missing it)',
+        help='County name for CSV import, e.g. "Henrico" (sets county for records missing it)',
     )
 
     parser.add_argument(
@@ -1435,8 +1206,8 @@ def cli_main() -> None:
                         help="Finish tier 1-4 (rehab mode, default: 2)")
     parser.add_argument("--scope", type=str, default="full", choices=["full", "wholetail"],
                         help="Rehab scope (rehab mode, default: full)")
-    parser.add_argument("--region", type=str, default="knoxville",
-                        help="Regional pricing (rehab mode, default: knoxville)")
+    parser.add_argument("--region", type=str, default="",
+                        help="Regional pricing slug (rehab mode; rehab_estimator's REGIONAL_MULTIPLIERS keys)")
     parser.add_argument("--sqft", type=int, default=0,
                         help="Property sqft override (rehab mode)")
     parser.add_argument("--bedrooms", type=int, default=0,
@@ -1494,7 +1265,7 @@ def cli_main() -> None:
     parser.add_argument("--blueprint", type=str, default="wholesale",
                         choices=["wholesale", "flip", "hold", "hybrid"],
                         help="Investment blueprint (playbook mode)")
-    parser.add_argument("--market", type=str, default="knoxville",
+    parser.add_argument("--market", type=str, default="",
                         help="Target market (playbook mode)")
     parser.add_argument("--team-size", type=int, default=1,
                         help="Team size 1/2/5 (playbook mode)")
@@ -1513,7 +1284,7 @@ def cli_main() -> None:
     setup_logging(args.verbose)
 
     # ── Preflight health checks ──────────────────────────────────────
-    preflight_failures = _preflight_check(args.mode, getattr(args, "source", None))
+    preflight_failures = _preflight_check(args.mode)
     if preflight_failures:
         for f in preflight_failures:
             logging.error("Preflight FAILED: %s", f)
@@ -1741,28 +1512,8 @@ def cli_main() -> None:
         _run_csv_import(args)
         return
 
-    # Filter saved searches
-    counties = None
-    if args.counties and args.counties.lower() != "all":
-        counties = [c.strip() for c in args.counties.split(",")]
-
-    types = None
-    if args.types and args.types.lower() != "all":
-        types = [t.strip() for t in args.types.split(",")]
-
-    searches = _filter_searches(counties, types)
-    if not searches:
-        logging.error("No saved searches match the given --counties / --types filters")
-        sys.exit(1)
-
-    logging.info(
-        "Running %d saved searches: %s",
-        len(searches),
-        ", ".join(s.saved_search_name for s in searches),
-    )
-
     try:
-        _run_scrape_pipeline(args, searches)
+        _run_scrape_pipeline(args)
     except Exception as e:
         logging.exception("Pipeline failed with unhandled error")
         try:
@@ -1773,39 +1524,19 @@ def cli_main() -> None:
         sys.exit(1)
 
 
-def _run_scrape_pipeline(args, searches) -> None:
-    """Run the daily/historical scrape → enrich → export → upload pipeline."""
-    # ── Acquisition: dispatch on --source ───────────────────────────
-    # PR puller's signature is `pull_all_lists(lists=None, download_dir=None)`
-    # — it has no `mode` or `since_date_override` because PR's UI has no
-    # Added-Date filter; delta is computed from a membership-set diff
-    # against pr_state.json (see plan 02-04 SUMMARY).
-    source = (getattr(args, "source", None) or "tnpn").lower()
-    if source == "propertyradar":
-        from propertyradar_puller import pull_all_lists
-        logger.info("Running PropertyRadar puller (--source propertyradar)")
-        notices = asyncio.run(pull_all_lists(
-            download_dir=config.OUTPUT_DIR,
-        ))
-    else:
-        logger.info("Running TN public-notice scraper (--source tnpn / default)")
-        notices = asyncio.run(scrape_all(
-            mode=args.mode, searches=searches,
-            llm_api_key=config.ANTHROPIC_API_KEY or None,
-            since_date_override=args.since,
-            max_notices=args.max_notices,
-        ))
-    # Handle async probate lookup before pipeline (requires asyncio.run)
-    probate_notices = [n for n in notices if n.notice_type == "probate" and n.decedent_name and not n.address]
-    if probate_notices:
-        try:
-            from property_lookup import lookup_decedent_properties
-            logging.info("Looking up property addresses for %d probate notices...", len(probate_notices))
-            asyncio.run(lookup_decedent_properties(probate_notices))
-        except ImportError:
-            logging.warning("property_lookup module not found -- skipping property lookup")
-        except Exception as e:
-            logging.warning("Property lookup failed: %s -- continuing without lookups", e)
+def _run_scrape_pipeline(args) -> None:
+    """Run the daily/historical PropertyRadar pull → enrich → export → upload pipeline.
+
+    PropertyRadar is the sole acquisition source. PR has no Added-Date
+    filter; delta is a membership-set diff against pr_state.json (see plan
+    02-04 SUMMARY), so `mode` (daily vs historical) doesn't affect what
+    gets pulled — both produce "new since last successful run".
+    """
+    from propertyradar_puller import pull_all_lists
+    logger.info("Running PropertyRadar puller (mode=%s)", args.mode)
+    notices = asyncio.run(pull_all_lists(
+        download_dir=config.OUTPUT_DIR,
+    ))
 
     # Run unified enrichment pipeline
     from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline
@@ -1962,15 +1693,14 @@ def _run_scrape_pipeline(args, searches) -> None:
 
         send_slack_notification(notices, upload_result=upload_result)
 
-        # PR-09: append the monthly PropertyRadar quota line for --source
-        # propertyradar runs so the operator sees consumed/budget at a glance.
-        if (getattr(args, "source", None) or "tnpn").lower() == "propertyradar":
-            try:
-                from propertyradar_quota import format_quota_summary
-                from slack_notifier import _send_webhook
-                _send_webhook(format_quota_summary())
-            except Exception:
-                logging.debug("Could not append PR quota summary", exc_info=True)
+        # PR-09: append the monthly PropertyRadar quota line so the
+        # operator sees consumed/budget at a glance after every run.
+        try:
+            from propertyradar_quota import format_quota_summary
+            from slack_notifier import _send_webhook
+            _send_webhook(format_quota_summary())
+        except Exception:
+            logging.debug("Could not append PR quota summary", exc_info=True)
 
     # Audit DataSift for incomplete records (future daily check)
     if getattr(args, "audit_records", False):

@@ -9,15 +9,18 @@ from pathlib import Path
 
 from playwright.async_api import Page, TimeoutError as PwTimeout, async_playwright
 
-from captcha_solver import solve_captcha_and_view
+from _legacy_tn.captcha_solver import solve_captcha_and_view
 import config
 from config import (
-    BASE_URL,
-    COOKIES_FILE,
-    LOGIN_URL,
     MAX_RETRIES,
     REQUEST_DELAY_MAX,
     REQUEST_DELAY_MIN,
+)
+from _legacy_tn import tn_config
+from _legacy_tn.tn_config import (
+    BASE_URL,
+    COOKIES_FILE,
+    LOGIN_URL,
     RESULTS_PER_PAGE,
     SAVED_SEARCHES,
     SEEN_IDS_FILE,
@@ -37,7 +40,7 @@ from config import (
     SEL_VIEW_BUTTON_PATTERN,
 )
 from data_formatter import _notice_id_from_url
-from foreclosure_filter import is_valid_foreclosure
+from _legacy_tn.foreclosure_filter import is_valid_foreclosure
 from notice_parser import NoticeData, is_target_county, parse_notice_page
 
 logger = logging.getLogger(__name__)
@@ -73,8 +76,8 @@ async def login(page: Page, _retries: int = 3) -> bool:
             return False
 
     # No CAPTCHA on the login page (confirmed via research)
-    await page.fill(SEL_LOGIN_EMAIL, config.TNPN_EMAIL)
-    await page.fill(SEL_LOGIN_PASSWORD, config.TNPN_PASSWORD)
+    await page.fill(SEL_LOGIN_EMAIL, tn_config.TNPN_EMAIL)
+    await page.fill(SEL_LOGIN_PASSWORD, tn_config.TNPN_PASSWORD)
     await page.click(SEL_LOGIN_SUBMIT)
     await page.wait_for_load_state("networkidle")
     await delay()

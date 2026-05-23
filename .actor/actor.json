@@ -1,8 +1,8 @@
 {
     "actorSpecification": 1,
-    "name": "tn-public-notice-scraper",
+    "name": "siftstack-propertyradar",
     "title": "SiftStack — REI Operations Platform",
-    "description": "Full-stack real estate investing operations platform. Data acquisition (web scrape, PDF, courthouse photos), enrichment (Smarty, Zillow, tax, obituary, skip trace), deal analysis (comps, rehab, MAO), CRM automation (DataSift sequences, niche sequential), and lead management.",
+    "description": "Full-stack real estate investing operations platform. PropertyRadar list pulls (VA/MD), courthouse photo + PDF import, enrichment (Smarty, Zillow, obituary, skip trace), deal analysis (comps, rehab, MAO), CRM automation (DataSift sequences, niche sequential), and lead management.",
     "version": "1.0",
     "buildTag": "latest",
     "input": "./input_schema.json",

@@ -1,9 +1,8 @@
 """Unit tests for src/propertyradar_config.py.
 
 Validates DEC-pr-lists fidelity (locked list config), PR-07 coexistence
-guarantees (state files distinct from TN), PR-03 state-file round-trip,
-and selector-placeholder discipline (Plan 03 has not yet captured real
-selectors).
+guarantees (state files distinct from the archived TN scraper's),
+PR-03 state-file round-trip, and selector-placeholder discipline.
 """
 
 import re
@@ -12,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-import config as tn_config
+from _legacy_tn import tn_config
 import propertyradar_config as prc
 
 

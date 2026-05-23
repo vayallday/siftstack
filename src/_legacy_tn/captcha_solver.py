@@ -16,8 +16,9 @@ import logging
 from playwright.async_api import Page, TimeoutError as PwTimeout
 from twocaptcha import TwoCaptcha
 
-import config
-from config import MAX_RETRIES, RECAPTCHA_SITEKEY, SEL_VIEW_NOTICE_BUTTON
+from config import MAX_RETRIES
+from _legacy_tn import tn_config
+from _legacy_tn.tn_config import RECAPTCHA_SITEKEY, SEL_VIEW_NOTICE_BUTTON
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ async def solve_captcha_and_view(page: Page) -> bool:
     Retries up to MAX_RETRIES times on failure.
     Returns True if the notice text is now visible, False otherwise.
     """
-    if not config.CAPTCHA_API_KEY:
+    if not tn_config.CAPTCHA_API_KEY:
         logger.error("CAPTCHA_API_KEY not set — cannot solve CAPTCHA")
         return False
 
@@ -70,7 +71,7 @@ async def solve_captcha_and_view(page: Page) -> bool:
             logger.warning(
                 "Solving reCAPTCHA for %s (attempt %d/%d)", page_url, attempt, MAX_RETRIES
             )
-            solver = TwoCaptcha(config.CAPTCHA_API_KEY)
+            solver = TwoCaptcha(tn_config.CAPTCHA_API_KEY)
             result = solver.recaptcha(
                 sitekey=RECAPTCHA_SITEKEY,
                 url=page_url,

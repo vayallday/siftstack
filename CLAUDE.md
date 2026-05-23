@@ -6,17 +6,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **SiftStack** — Full-stack real estate investing operations platform built around DataSift.ai CRM. Covers the entire REI business lifecycle:
 
-1. **Data Acquisition:** Web scraping tnpublicnotice.com (foreclosures, tax sales, probates), scanned PDF import, courthouse terminal photo import (probate, eviction, code violations, divorce), Dropbox auto-polling
-2. **Enrichment Pipeline:** 10+ steps — Smarty address standardization, Zillow property data, Knox County Tax API, obituary/heir research, Ancestry.com SSDI, Tracerfy skip trace, Trestle phone scoring, entity research
+1. **Data Acquisition:** PropertyRadar list pulls (foreclosures, pre-probate) via Playwright against app.propertyradar.com, scanned PDF import, courthouse terminal photo import (probate, eviction, code violations, divorce), Dropbox auto-polling
+2. **Enrichment Pipeline:** 10+ steps — Smarty address standardization, Zillow property data, obituary/heir research, Ancestry.com SSDI, Tracerfy skip trace, Trestle phone scoring, entity research
 3. **Deal Analysis:** Comparable sales (Two-Bucket ARV), rehab estimation (4-tier room-by-room), deal analyzer (MAO/ROI/financing scenarios)
 4. **Market Intelligence:** Zip code scoring, Market Finder reports, cash buyer list building, investor portfolio analysis
 5. **CRM Automation:** DataSift upload, 26 TCA sequence templates, 12 niche sequential marketing presets, filter preset management, SiftMap sold property tagging
 6. **Lead Management:** 4 Pillars of Motivation auto-qualification, STABM daily routine, pipeline reporting, deep prospecting (4-level framework)
 7. **Operations:** Acquisition playbook generator (SOPs, scripts, checklists), Slack/Discord notifications, Google Drive upload, Apify Actor deployment
 
-Currently focused on Knox and Blount counties, Tennessee.
+Currently focused on Virginia (Richmond, Henrico, Chesterfield, Prince William) and Maryland (Prince George's, Montgomery) markets via PropertyRadar.
 
 8. **REI Skill Library:** 13 Claude Co-Work skill files (`.skill`/`.plugin` ZIPs) for distribution to DataSift community via [learn.datasift.ai/claude-skills-rei](https://learn.datasift.ai/claude-skills-rei). Skills teach Claude specific REI workflows when uploaded to Co-Work sessions or Projects.
+
+### Archived: Tennessee public-notice acquisition
+
+The original data source was `tnpublicnotice.com` for Knox + Blount, TN.
+Those acquisition files (the Playwright scraper, the 2Captcha integration,
+the TN trustee-sale filter, the Knox County tax API client, the Knox
+KGIS + Blount TPAD property-lookup helpers, and the TN-specific config)
+moved to [src/_legacy_tn/](src/_legacy_tn/) when the focus shifted to
+VA/MD. Nothing under that folder is imported by any active code path —
+it's preserved as documentation and as a starting point for any future
+state that needs a similar ASP.NET / reCAPTCHA-gated scrape pipeline.
+See [src/_legacy_tn/README.md](src/_legacy_tn/README.md).
 
 ## Commands
 
@@ -26,12 +38,10 @@ pip install -r requirements.txt
 playwright install chromium
 cp .env.example .env  # then fill in credentials
 
-# Run
-python src/main.py daily                          # new notices since last run
-python src/main.py historical                     # last 12 months of data
-python src/main.py daily --split                  # separate CSV per county+type
-python src/main.py daily --counties Knox          # only Knox county
-python src/main.py daily --types foreclosure,probate  # only specific types
+# Run — PropertyRadar pulls (the only acquisition source)
+python src/main.py daily                          # pull deltas across all configured PR lists
+python src/main.py historical                     # same flow (PR has no Added-Date filter; delta is membership-diff)
+python src/main.py daily --split                  # separate CSV per list
 python src/main.py daily -v                       # verbose/debug logging
 
 # DataSift preset/sequence management
@@ -42,11 +52,11 @@ python src/main.py manage-presets --all                           # discovery + 
 
 # SiftMap sold property tagging
 python src/main.py manage-sold --months-back 12                   # tag sold properties (last 12 months)
-python src/main.py manage-sold --counties Knox --min-sale-price 5000
+python src/main.py manage-sold --counties Henrico --min-sale-price 5000
 
 # Courthouse photo import (build 1.0.28+)
-python src/main.py photo-import --folder ./photos --photo-county Knox --photo-type probate
-python src/main.py photo-import --folder ./photos --photo-county Knox --photo-type eviction --skip-obituary
+python src/main.py photo-import --folder ./photos --photo-county Henrico --photo-type probate
+python src/main.py photo-import --folder ./photos --photo-county Henrico --photo-type eviction --skip-obituary
 python src/main.py dropbox-watch                                  # auto-poll Dropbox for new photos
 python src/main.py dropbox-watch --poll-interval 300 --max-polls 5  # 5-min interval, 5 cycles
 python src/main.py dropbox-watch --no-delete                      # keep photos in Dropbox after processing
@@ -57,47 +67,48 @@ All source files are in `src/` and imports assume `src/` is the working director
 ## Architecture
 
 **Data flows:**
-- **Web scrape:** `main.py` → `scraper.py` → `captcha_solver.py` → `notice_parser.py` + `foreclosure_filter.py` → enrichment → CSV
+- **PropertyRadar pull:** `main.py` → `propertyradar_puller.py` (Playwright against app.propertyradar.com) → membership-diff vs `pr_state.json` → CSV export wizard → `propertyradar_parser.py` → enrichment → CSV
 - **PDF import:** `main.py` → `pdf_importer.py` (pypdfium2 → `image_utils.py` OCR) → enrichment → CSV
 - **Photo import:** `main.py` → `photo_importer.py` (OpenCV → `image_utils.py` OCR → `llm_parser.py`) → enrichment → CSV
 - **Dropbox watch:** `dropbox_watcher.py` → `photo_importer.py` → enrichment → CSV (auto-polling loop)
-- **Market Finder:** `extract_market_finder.py` → DataSift Market Finder (Playwright) → paginate all ZIP + neighborhood data → JSON → `generate_knox_report.py` → 7-sheet Excel
+- **Market Finder:** `extract_market_finder.py` → DataSift Market Finder (Playwright) → paginate all ZIP + neighborhood data → JSON
 
-- **main.py** — CLI entry point. Parses args (`daily`/`historical`, `--split`, `--counties`, `--types`, `-v`). Filters saved searches by county/type, orchestrates scrape → dedup → export, logs run summary stats.
-- **scraper.py** — Playwright browser automation. Reuses saved session cookies when possible, falls back to fresh login. Selects each saved search from the Smart Search dropdown (triggers ASP.NET postback), paginates results (50/page max), clicks each View button to open notice detail pages. Uses `last_run.json` for daily mode state, `cookies.json` for session persistence.
-- **captcha_solver.py** — Solves reCAPTCHA v2 via **2Captcha API** on every notice detail page. Sends websiteURL + sitekey, gets back a `g-recaptcha-response` token, injects it, clicks "View Notice". Retries up to 3 times. This is the primary bottleneck (~10-30s per notice).
-- **notice_parser.py** — Extracts structured fields from raw notice text using regex. There are NO structured HTML fields on the site — address, owner, dates are all embedded in free-text notice bodies. Defines the `NoticeData` dataclass used throughout.
-- **foreclosure_filter.py** — Filters foreclosure search results to only keep real first-to-market trustee sales. Matches against observed title variations (substitute/successor trustee sales). Non-foreclosure notice types pass through unfiltered.
-- **data_formatter.py** — Deduplicates by address (keeps most recent), then converts `NoticeData` list to Sift upload CSV. Split mode produces `{county}_{type}_{timestamp}.csv` files.
-- **config.py** — Credentials (from `.env`), ASP.NET element selectors, saved search definitions, rate limiting constants, paths, image processing thresholds.
+- **main.py** — CLI entry point. Modes: `daily`/`historical` (PropertyRadar pulls), `pdf-import`, `photo-import`, `dropbox-watch`, `csv-import`, `phone-validate`, `manage-presets`, `manage-sold`, plus analysis modes (`comp`, `rehab`, `analyze-deal`, `market-analysis`, `buyer-prospect`, `deep-prospect`, `lead-manage`, `setup-sequences`, `niche-sequential`, `playbook`).
+- **propertyradar_puller.py** — Playwright automation of `app.propertyradar.com` lists. Two-phase BufferedStore scrape (prime → poll → read RadarIDs), membership-diff vs `pr_state.json`, two-step export wizard (Continue → Purchase → Download CSV), quota guard.
+- **propertyradar_config.py** — Locked 4-list registry (`PROPERTYRADAR_LISTS`), JS snippets for the ExtJS grid Store API, selectors, state-file paths, schema versioning. See `src/_legacy_tn/README.md` for the previous TN equivalents.
+- **propertyradar_parser.py** — PR CSV → `NoticeData`. Handles PR's abbreviated column names ("Radar ID", "Mail Address", etc.) and filters PR's license-disclaimer footer rows via `_RADAR_ID_RE`.
+- **propertyradar_quota.py** — Monthly export quota tracker (10K Solo plan), per-month dedup of 50/80/95/100% threshold alerts, `format_quota_summary()` for Slack appendix.
+- **notice_parser.py** — Defines the `NoticeData` dataclass used by every puller. Also contains regex-based parsers for free-text notice bodies (legacy TN web-scrape pipeline; PR pulls don't need them).
+- **data_formatter.py** — Deduplicates by address (keeps most recent), converts `NoticeData` list to upload CSV. Split mode produces `{county}_{type}_{timestamp}.csv` files.
+- **config.py** — State-agnostic config: credentials for Smarty/Zillow/Anthropic/Tracerfy/Trestle/DataSift/Slack/Dropbox/etc., paths, image-processing thresholds, entity-detection regexes, JSON state-file utilities. No acquisition-source-specific config — those live next to the puller (`propertyradar_config.py`, `_legacy_tn/tn_config.py`).
 - **image_utils.py** — Shared OCR utilities used by both `pdf_importer.py` and `photo_importer.py`. Exports `fix_rotation()` (Tesseract OSD) and `ocr_page(image, psm)` with configurable page segmentation mode. Handles Tesseract binary detection.
 - **photo_importer.py** — Courthouse phone photo import. OpenCV preprocessing chain (EXIF transpose → blur check → bilateral filter → perspective correction → Otsu threshold) → Tesseract OCR (PSM 4) → LLM parsing → NoticeData. Supports all 7 notice types.
-- **dropbox_watcher.py** — Cursor-based Dropbox folder polling. Downloads new photos, resolves county + notice_type from folder path (`/Knox/eviction/photo.jpg`), processes through photo_importer, deletes from Dropbox after success. State persisted to `dropbox_state.json` + `photo_state.json`.
+- **dropbox_watcher.py** — Cursor-based Dropbox folder polling. Downloads new photos, resolves county + notice_type from folder path (`/Henrico/eviction/photo.jpg`), processes through photo_importer, deletes from Dropbox after success. State persisted to `dropbox_state.json` + `photo_state.json`.
 - **report_generator.py** — Generates per-record PDF deep prospecting reports using reportlab. Includes property summary, signing chain with phone tiers, valuation, deceased owner detection. Output to `output/reports/`.
 - **extract_market_finder.py** — Playwright automation to extract ALL ZIP code + neighborhood data from DataSift Market Finder. Handles styled-component dropdowns, pagination (20 rows/page), Beamer popup dismissal. Outputs JSON. See "Market Finder Extraction Patterns" below.
 - **market_analyzer.py** — ZIP code scoring engine. 6-factor weighted composite (Distress 30%, Value 20%, Equity 15%, Tax Delinquency 15%, Competition 10%, DOM 10%). Grades A/B/C/D, budget allocation across top ZIPs. Reads from scraped notice CSVs in `output/`.
 - **drive_uploader.py** — Google Drive upload via service account. `upload_file()` (generic, returns webViewLink) and `upload_csv()` (CSV-specific, returns file ID).
 
-## Site-Specific Details
+## PropertyRadar Lists (current acquisition source)
 
-The site is **ASP.NET WebForms** — all navigation uses `__doPostBack()` with ViewState. Session IDs are embedded in URL paths (`/(S({guid}))/`). Playwright is required because direct HTTP requests would need to manage ViewState/EventValidation manually.
+Four lists are pre-configured on the PR account and locked into `propertyradar_config.PROPERTYRADAR_LISTS`:
 
-**reCAPTCHA v2 is required on every single notice detail page**, even when logged in. There is no CAPTCHA on login, search, or results pages. The sitekey is hardcoded in `config.py`.
+| Slug | List name | Notice type |
+|---|---|---|
+| `md_auction` | `MD_Auction in 90 Days_No Pre-Probate_No Vacant` | `foreclosure` |
+| `va_auction` | `VA_Auction in 90 Days_No Pre-Probate_No Vacant` | `foreclosure` |
+| `md_pre_probate` | `MD_Pre-Probate_Distress >60_Occupied` | `pre_probate` |
+| `va_pre_probate` | `VA_Pre-Probate_Distress >60_Occupied` | `pre_probate` |
 
-## Saved Searches
-
-8 searches defined in `config.py` as `SAVED_SEARCHES`. Each maps to an exact dropdown option name on the Smart Search dashboard:
-- Knox & Blount × (Foreclosure V2, Tax Sale V2, Tax Delinquent V2, Probate V2)
-
-Filterable via `--counties` and `--types` CLI args (comma-separated, or omit for all).
+PR's web UI has **no Added-Date filter** so we can't filter exports server-side. The puller therefore reads each list's full membership via the ExtJS grid Store API (`Ext.data.BufferedStore`), diffs RadarIDs against `pr_state.json`, and only exports the new IDs. Re-exports of the same list still bill, so the diff happens *before* the export wizard runs. See [propertyradar-buffered-store](memory) for the API quirks.
 
 ## Key Domain Rules
 
-- **Foreclosure filtering is critical.** Not all notices from "Foreclosure" saved searches are actual foreclosures. The scraper parses each notice's full text and only includes ones with trustee sale language. See `INCLUDE_PHRASES` / `EXCLUDE_PHRASES` in `foreclosure_filter.py`.
+- **PropertyRadar quota:** 10,000 record exports per month on the Solo plan. `propertyradar_quota.py` tracks consumption in `pr_quota.json` and fires Slack alerts at 50/80/95/100% (per-month dedup). The puller refuses to export beyond budget.
 - **Probate owner_name** should be the Personal Representative/Executor/Administrator — not the deceased.
-- **Owner names** in foreclosure notices typically appear after "executed by" in the deed of trust language.
+- **PropertyRadar `pre_probate` is NOT court probate.** It's a property-records signal (deceased owner per assessor data); no PR/executor is named. Distinct from court-filed `probate`, which doesn't exist for VA/MD until a photo-import pipeline is wired to those courthouses.
 - **Rate limiting:** 2-3 second random delays between requests, 3 retries per page.
-- **Address dedup:** Same property can appear in multiple notices; `data_formatter.deduplicate()` keeps the most recent.
+- **Address dedup:** Same property can appear in multiple lists; `data_formatter.deduplicate()` keeps the most recent.
 
 ## Output
 
@@ -122,9 +133,8 @@ apify push
 ```
 
 ### Actor Input (configured in Apify Console or `input.json`)
-- `mode`: "daily" or "historical"
-- `counties` / `types`: arrays to filter saved searches (empty = all)
-- `tn_username`, `tn_password`, `captcha_api_key`: secrets (required)
+- `mode`: "daily" or "historical" (PropertyRadar pulls; mode is informational — delta is membership-diff)
+- `pr_username`, `pr_password`: PropertyRadar login secrets (required)
 - `google_drive_folder_id`, `google_service_account_key`: optional Google Drive upload
 
 ### Actor Output
@@ -141,7 +151,7 @@ apify push
 
 ## Courthouse Photo Pipeline (build 1.0.28+)
 
-Courthouse terminal photos → OCR → LLM parse → enrichment → DataSift. Runner takes phone photos at Knox/Blount county terminals, uploads to Dropbox organized as `{county}/{notice_type}/`, system auto-processes.
+Courthouse terminal photos → OCR → LLM parse → enrichment → DataSift. Runner takes phone photos at county courthouse terminals, uploads to Dropbox organized as `{county}/{notice_type}/`, system auto-processes. The OCR + parse layer is state-agnostic; only the obituary enricher's domain whitelist and the address standardizer's default state would need to be retargeted for non-TN courts.
 
 ### Notice Types (7 total)
 - `foreclosure`, `tax_sale`, `tax_delinquent`, `probate` — existing from web scraper
@@ -159,17 +169,12 @@ Courthouse terminal photos → OCR → LLM parse → enrichment → DataSift. Ru
 
 ### Probate Deep Prospecting (from courthouse terminals)
 
-Courthouse probate records have decedent name + PR/executor name but NO property address. Multi-tier lookup fills the gap:
-
-**Property Address Lookup** (Step 3c in enrichment pipeline):
-1. **Tier 1: Knox Tax API name search** — search `/parcels/{decedent_name}`, score by token overlap (FIRST MIDDLE LAST → LAST FIRST MIDDLE), accept >= 0.4 match. Tries multiple name variations (with/without suffix, LAST FIRST format, first+last only).
-2. **Tier 2: Executor family search** — search Knox Tax API by executor name, look for properties where decedent's last name appears in owner field (family property transferred to executor).
-3. **Tier 3: People search** — search TruePeopleSearch/FastPeopleSearch for decedent's last known Knox County address.
+Courthouse probate records have decedent name + PR/executor name but NO property address. Property-address lookup originally went through a 3-tier waterfall (Knox Tax API → executor family search → people search). The Knox Tax API tier was archived to `src/_legacy_tn/tax_enricher.py` when TN was retired. The remaining generic tiers (people search via Serper/Firecrawl + LLM extraction; DuckDuckGo fallback) are state-neutral and live in `obituary_enricher._lookup_dm_address()`.
 
 **Probate Preset** (obituary enricher):
 - Triggers when court record has PR name + decedent name (no address required) — prevents wrong obituary from overriding court-named executor
 - Sets DM = the named PR/executor directly, skips obituary search entirely
-- Then runs DM address lookup (Knox Tax API → People Search → Tracerfy)
+- Then runs DM address lookup (People Search → Tracerfy)
 
 **DOD Sanity Check** (obituary enricher):
 - Rejects obituary matches where DOD is > 3 years before the notice filing date (`MAX_DOD_GAP_YEARS = 3`)
@@ -179,14 +184,14 @@ Courthouse probate records have decedent name + PR/executor name but NO property
 ### Dropbox Folder Structure
 ```
 {DROPBOX_ROOT_FOLDER}/
-├── Knox/
+├── {County}/
 │   ├── eviction/
 │   ├── code_violation/
 │   ├── divorce/
 │   ├── foreclosure/
 │   ├── tax_sale/
 │   └── probate/
-└── Blount/
+└── {OtherCounty}/
     └── (same subfolders)
 ```
 
@@ -195,7 +200,7 @@ Courthouse probate records have decedent name + PR/executor name but NO property
 - `DROPBOX_APP_SECRET` — Dropbox OAuth2 app secret
 - `DROPBOX_REFRESH_TOKEN` — Dropbox offline refresh token (auto-rotates access tokens)
 - `DROPBOX_POLL_INTERVAL` — seconds between polls (default 900 = 15 min)
-- `DROPBOX_ROOT_FOLDER` — root folder path in Dropbox (e.g., "TN Public Notice")
+- `DROPBOX_ROOT_FOLDER` — root folder path in Dropbox (e.g., "SiftStack")
 
 ### Dependencies (added to requirements.txt)
 - `opencv-python-headless>=4.13.0` — image preprocessing (headless = no GUI, saves 26MB in Docker)
@@ -239,7 +244,7 @@ DataSift's niche sequential system uses filter presets to guide records through 
 - Only core address fields (Property Street, City, State, ZIP) reliably auto-map
 - Tags, Lists, Estimated Value, and enrichment columns often stay unmapped in step 4
 - Notes and MSL Status sometimes auto-map
-- Custom fields (TN Public Notice group) require drag-and-drop mapping
+- Custom fields (SiftStack custom-field group) require drag-and-drop mapping
 
 ### Contact Logic
 - **Deceased owners:** Contact = decision maker (first/last name + mailing address from DM)
@@ -323,7 +328,7 @@ Hard-won patterns from build 1.0.22-1.0.23 (SiftMap, preset management, sequence
 - "Sold Property Cleanup" sequence exists in Transactions folder (build 1.0.23): Trigger (Property Tags Added) → Condition (Sold) → Actions (Status→Sold, Remove Lists, Clear Tasks, Clear Assignee)
 
 **SiftMap Automation**
-- Search by city (NOT county): Knox → "Knoxville, TN", Blount → "Maryville, TN"
+- Search by city (NOT county) — e.g., Henrico → "Richmond, VA", Prince George's → "Upper Marlboro, MD"
 - PropertyDetails panel auto-opens on search — remove from DOM before other interactions
 - "Add Records to Account" modal: toggle OFF "Do not replace owners", add tags, dismiss dropdown by clicking heading (NOT Escape — clears tags)
 - Known limitation: SiftMap filters (price, date) set values visually but don't trigger React re-query. Only sidebar-visible properties (~3-5) get added per run
@@ -333,7 +338,7 @@ Hard-won patterns from build 1.0.22-1.0.23 (SiftMap, preset management, sequence
 Hard-won patterns from building `extract_market_finder.py`. The Market Finder UI differs significantly from the rest of DataSift.
 
 - **NO HTML `<table>` element** — data table is entirely div-based: `Tablestyles__TableContainer` → `TableRow` → `TableCell` (styled-components). Searching for `<table>` or `<tr>/<td>` finds nothing.
-- **PAGINATION, not infinite scroll** — table shows 20 rows per page with "1-20 of N" text and `PaginationInnerContainer` with prev/next `<button>` elements. Must click through ALL pages to get complete data. Knox County has 48 ZIPs (3 pages) and 120+ neighborhoods (7 pages).
+- **PAGINATION, not infinite scroll** — table shows 20 rows per page with "1-20 of N" text and `PaginationInnerContainer` with prev/next `<button>` elements. Must click through ALL pages to get complete data. (Mid-size county example: ~50 ZIPs across 3 pages, ~120 neighborhoods across 7 pages.)
 - **State/County selection uses `InputMultiSearch`** — NOT styled-component Select dropdowns. Inputs have placeholders: `"Select States"`, `"Select Counties"`, `"Select ZIP Codes"`. Click input → type name → click dropdown result item (`[class*="Item"]:has-text("...")`).
 - **ZIP/Neighborhood toggle is a styled Select dropdown** — at the top bar with `Selectstyles__SelectValue` showing current view. Check the displayed text BEFORE clicking — if already on the correct view, clicking toggles AWAY from it. Only click to switch if the displayed text doesn't match the desired view.
 - **Beamer push modal (`#beamerPushModal`)** — appears on fresh login, blocks ALL pointer events. Different from the NPS survey (`#npsIframeContainer`). Both must be removed from DOM before any click interactions. Always call dismiss with `force=True` as fallback.
@@ -342,8 +347,8 @@ Hard-won patterns from building `extract_market_finder.py`. The Market Finder UI
 
 ```bash
 # Extract all Market Finder data for a county
-python src/extract_market_finder.py --state "Tennessee" --county "Knox" -v
-python src/extract_market_finder.py --state "Tennessee" --county "Knox,Blount" --headless
+python src/extract_market_finder.py --state "Virginia" --county "Henrico" -v
+python src/extract_market_finder.py --state "Virginia" --county "Henrico,Chesterfield" --headless
 
 # Output: JSON file in output/market_finder_{state}_{county}_{timestamp}.json
 ```
@@ -426,36 +431,26 @@ plugin-name.plugin (ZIP containing):
 - **Preferred run time:** 5:00 AM
 - **Dispositions:** Send to DataSift List `Siftstack`
 
-### PropertyRadar Migration Notes
+### PropertyRadar Architecture Notes
 
-The current codebase (scraper.py, captcha_solver.py, notice_parser.py, foreclosure_filter.py) targets tnpublicnotice.com and is TN-only. PropertyRadar is the intended replacement data source for VA/MD markets, but the migration has not been built yet.
+PropertyRadar is the active acquisition source. The four pre-configured
+lists (see "PropertyRadar Lists" section above) auto-refresh daily on the
+PR side; the puller's job is to pull **new records added since the last
+successful run** and feed them through the existing enrichment + DataSift
+upload pipeline.
 
-**Source-of-truth pattern:** User has already created PropertyRadar Lists in the app that auto-refresh daily with new matching properties. The integration is therefore not about building searches — it's about pulling **new records added to those lists since the last run** and feeding them through the existing enrichment + DataSift upload pipeline. This matches the existing `daily` mode mental model (delta since `last_run.json`).
+**Account constraints:**
+- We're on the Solo plan (10K monthly export quota). Tracked in `pr_quota.json` with 50/80/95/100% Slack alerts.
+- No REST API access (that's the $599/mo Business plan). Transport is Playwright against the web UI.
+- PR's web UI has **no Added-Date filter** server-side. Delta has to be computed client-side: read full list membership, diff RadarIDs vs `pr_state.json`, only export the new IDs.
+- "Purchase" / "Export" both count against quota even for re-exports of the same list — never export the full list when the diff is empty.
 
-**Configured PropertyRadar Lists** (mixed counties/cities within each state):
+**Coverage gaps in VA/MD:**
+- Foreclosure ✓, Divorce ✓, Assessor/Recorder (incl. deceased-owner signal for `pre_probate`) ✓.
+- Probate, Eviction, Code Violation — **NOT available** in VA/MD. Those are still photo-import notice types (`src/photo_importer.py`) sourced from county courthouse terminals.
 
-| List name in PropertyRadar | Markets | Notice type | Notes |
-|---|---|---|---|
-| `MD_Auction in 90 Days_No Pre-Probate_No Vacant` | MD (Prince George's, Montgomery) | `foreclosure` | Auction within 90 days; excludes pre-probate + vacant |
-| `VA_Auction in 90 Days_No Pre-Probate_No Vacant` | VA (Richmond, Henrico, Chesterfield, Prince William) | `foreclosure` | Auction within 90 days; excludes pre-probate + vacant |
-| `MD_Pre-Probate_Distress >60_Occupied` | MD (Prince George's, Montgomery) | `pre_probate` | Deceased-owner signal + Distress Score > 60 + occupied |
-| `VA_Pre-Probate_Distress >60_Occupied` | VA (Richmond, Henrico, Chesterfield, Prince William) | `pre_probate` | Deceased-owner signal + Distress Score > 60 + occupied |
+**`pre_probate` vs `probate`:**
+PR's deceased-owner signal is property-records based (no executor named, no court filing). The pipeline tags this as `pre_probate` to distinguish it from court-filed `probate` — the latter has a named PR/executor and triggers the obituary-enricher's "DM = named PR" preset; the former needs heir research because we only know the owner is dead.
 
-This adds an **8th notice type** (`pre_probate`) to the existing 7 — distinct from court-filed `probate` because no PR/executor is named yet; the owner is just deceased per property records. Court probate, eviction, and code violation in VA/MD will come from a different source (TBD).
-
-**Decisions locked:**
-- **Transport:** Playwright against web UI (current Solo/Team tier — no Business plan upgrade).
-- **Cadence:** daily, aligned with user's 5:00 AM run time.
-- **Delta:** filter each list by "Added to List" date ≥ last successful run timestamp before exporting (records are billed; never re-export full list).
-- **Coexistence:** PropertyRadar puller runs alongside the existing TN scraper, not as a replacement — gated by `--source propertyradar` CLI flag (or new mode).
-
-Key facts to consider when planning:
-
-- **REST API exists** — Bearer-token auth, JSON, 250+ search criteria. Endpoints: `/Properties`, `/Lists`, webhooks. Docs: https://developers.propertyradar.com/
-- **API access requires Business plan** ($599/mo, 50K records). Solo ($119) and Team ($249) plans are web-UI only.
-- **VA/MD data coverage gaps:** Foreclosure ✓, Divorce ✓, Assessor/Recorder ✓. Probate, Eviction, Code Violation — **NOT available** in VA/MD (these are the photo-import notice types in the current pipeline). Tax Delinquent coverage varies by county and needs verification.
-- **Web UI export workflow:** Open list → "..." menu → Export to File → field set → CSV/XLSX. Async for large exports (email delivery). Records count against monthly quota; re-exports of same list still consume quota — must filter to "new since last run" before export.
-- **List delta strategy:** PropertyRadar lists track when each property was added via the "Added Date" / "First Added to List" field. Filter on this before export to pull only new records since last cron run. Persist last-seen timestamp per list (analogous to current `last_run.json`).
-- **If using web UI only** (current account state): Playwright automation against `app.propertyradar.com` → log in → navigate to each named list → apply "added since X" filter → export wizard → CSV. Pattern is similar to existing [datasift_uploader.py](src/datasift_uploader.py).
-- **If on Business plan:** Use Lists API to query members added since a timestamp + webhooks to push to our endpoint on list-membership changes (true event-driven, no polling).
-- **Enrichment overlap:** PropertyRadar natively includes owner name, mailing address, equity, est value, phones/emails (paid append), foreclosure stage, trustee details. Switching could simplify or eliminate several current enrichment steps (Smarty, Zillow, Knox Tax API, Tracerfy). Trestle phone scoring may still add value; obituary/heir research stays for probate (but probate isn't in PR for VA/MD).
+**Enrichment overlap (post-migration):**
+PR exports already include owner name, mailing address, equity, estimated value, parcel ID, foreclosure stage, and trustee details. That eliminates the need for Smarty/Zillow/county-tax bridges for VA/MD records (those steps still run but find the data already present and skip themselves). Trestle phone scoring still adds value; obituary/heir research stays in the loop for `pre_probate` records (since PR doesn't name the heirs).

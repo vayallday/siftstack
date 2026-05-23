@@ -579,7 +579,14 @@ def main():
 
     print("\n-- Property lookup name formatting tests --")
 
-    from property_lookup import _format_name_for_search, _normalize_tpad_address, _maiden_name_variant
+    # property_lookup was archived with the rest of the TN data-pull stack
+    # (src/_legacy_tn/) — the helpers themselves are state-agnostic regex
+    # so we still exercise them, just from the archive package.
+    from _legacy_tn.property_lookup import (
+        _format_name_for_search,
+        _normalize_tpad_address,
+        _maiden_name_variant,
+    )
 
     def name_format_test(label, input_name, expected):
         global passed, failed

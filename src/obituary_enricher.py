@@ -792,41 +792,6 @@ Web page text:
 {page_text}"""
 
 
-def _lookup_dm_address_knox_tax(name: str) -> dict | None:
-    """Search Knox County tax API by DM name for a property address.
-
-    The /parcels/ endpoint accepts owner name searches.
-    Returns {street, city, state, zip} or None.
-    """
-    from urllib.parse import quote
-
-    search_url = f"{KNOX_TAX_API}/parcels/{quote(name)}?detail_level=public&start=0&length=3"
-    try:
-        resp = requests.get(search_url, timeout=10)
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-        data = resp.json()
-        parcels = data.get("parcels", [])
-        if not parcels:
-            return None
-
-        # Take first result — check owner name roughly matches
-        p = parcels[0]
-        addr = p.get("parcel_address", "").strip()
-        if not addr:
-            return None
-
-        # parcel_address is just the street — we need city/zip from other sources
-        # The tax API doesn't provide city/zip reliably, so return street only
-        # and let Smarty fill in city/state/zip later
-        logger.debug("Knox tax API found address for %s: %s", name, addr)
-        return {"street": addr, "city": "Knoxville", "state": "TN", "zip": ""}
-    except Exception as e:
-        logger.debug("Knox tax API DM lookup failed for %s: %s", name, e)
-        return None
-
-
 def _lookup_dm_address_web(name: str, city: str, api_key: str) -> dict | None:
     """Search free people search sites for DM's residential address.
 
@@ -863,7 +828,7 @@ def _lookup_dm_address_web(name: str, city: str, api_key: str) -> dict | None:
             # LLM extraction
             prompt = ADDRESS_EXTRACT_PROMPT.format(
                 name=name,
-                city=city or "Knoxville",
+                city=city or "",
                 page_text=page_text[:MAX_OBITUARY_TEXT],
             )
             try:
@@ -902,7 +867,7 @@ def _build_people_search_urls(name: str, city: str) -> list[str]:
         return []
     first = parts[0].lower()
     last = parts[-1].lower()
-    city_clean = (city or "Knoxville").strip().lower().replace(" ", "-")
+    city_clean = (city or "").strip().lower().replace(" ", "-")
 
     urls = [
         # CyberBackgroundChecks — shows full address history, phones, relatives
@@ -931,7 +896,7 @@ def _search_serper(name: str, city: str) -> list[str]:
 
     # CyberBackgroundChecks is the only free site Firecrawl can scrape reliably.
     # TruePeopleSearch times out, FastPeopleSearch is Cloudflare-blocked.
-    city_clean = (city or "Knoxville").strip()
+    city_clean = (city or "").strip()
     query = f'"{first} {last}" {city_clean} TN site:cyberbackgroundchecks.com'
 
     try:
@@ -1064,7 +1029,7 @@ def _extract_address_from_page(
     """Use Claude Haiku to extract a mailing address from page text."""
     prompt = ADDRESS_EXTRACT_PROMPT.format(
         name=name,
-        city=city or "Knoxville",
+        city=city or "",
         page_text=page_text[:MAX_ADDRESS_TEXT],
     )
     try:
@@ -1229,7 +1194,7 @@ def _batch_tracerfy_lookup(notices: list) -> None:
         last_name = parts[-1]
         # Use property address as the known address for skip tracing
         addr = n.address.strip()
-        city_hint = n.city.strip() or "Knoxville"
+        city_hint = n.city.strip() or ""
         zip_code = n.zip.strip()
         writer.writerow([first_name, last_name, addr, city_hint, "TN",
                          zip_code, "", "", ""])
@@ -1336,7 +1301,7 @@ def _lookup_dm_address(
     """Look up decision-maker's mailing address using tiered sources.
 
     Tier 0 (opt-in): Tracerfy skip tracing (paid, highest hit rate)
-    Tier 1: Knox County Tax API (free, fast, Knox only)
+    Tier 1: [REMOVED] Knox County Tax API — see src/_legacy_tn/tax_enricher.py
     Tier 2: Serper.dev + Firecrawl + LLM (cheap, national)
     Tier 2b: DuckDuckGo fallback (free, unreliable -- used when Serper not configured)
 
@@ -1352,7 +1317,7 @@ def _lookup_dm_address(
         import config as cfg
         if cfg.TRACERFY_API_KEY:
             tf_result = _lookup_dm_address_tracerfy(
-                name, city or "Knoxville", address="", zip_code=""
+                name, city or "", address="", zip_code=""
             )
             if tf_result and tf_result.get("street"):
                 result.update(tf_result)
@@ -1361,26 +1326,15 @@ def _lookup_dm_address(
                             result["street"], result["city"])
                 return result
 
-    # Tier 1: Knox County Tax API (free, fast)
-    knox_cities = {"knoxville", "powell", "corryton", "mascot", "halls",
-                   "farragut", "karns", "gibbs", "fountain city"}
-    dm_city = (city or "").lower().strip()
-    if not dm_city or dm_city in knox_cities:
-        name_parts = name.split()
-        if len(name_parts) >= 2:
-            tax_name = f"{name_parts[-1]} {' '.join(name_parts[:-1])}"
-            tax_result = _lookup_dm_address_knox_tax(tax_name)
-            if tax_result and tax_result.get("street"):
-                result.update(tax_result)
-                result["source"] = "knox_tax_api"
-                logger.info("    Tier 1 (Knox Tax): %s", result["street"])
-                return result
-        time.sleep(random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX))
+    # Tier 1 (Knox County Tax API) was removed when the TN data pull was
+    # archived to src/_legacy_tn/. PropertyRadar already supplies DM mailing
+    # addresses for VA/MD records, so the free county-tax bridge isn't
+    # needed for our current markets.
 
     # Tier 2: Direct people search URLs + Firecrawl + LLM
     import config as cfg
     sf_result = _lookup_dm_address_serper_firecrawl(
-        name, city or "Knoxville", api_key
+        name, city, api_key
     )
     if sf_result and sf_result.get("street"):
         result.update(sf_result)
@@ -1391,7 +1345,7 @@ def _lookup_dm_address(
 
     # Tier 2b: DuckDuckGo fallback (when Serper/Firecrawl not configured)
     if not cfg.SERPER_API_KEY and not cfg.FIRECRAWL_API_KEY:
-        web_result = _lookup_dm_address_web(name, city or "Knoxville", api_key)
+        web_result = _lookup_dm_address_web(name, city, api_key)
         if web_result and web_result.get("street"):
             result.update(web_result)
             result["source"] = "ddg_people_search"
@@ -1402,7 +1356,6 @@ def _lookup_dm_address(
     return result
 
 
-KNOX_TAX_API = "https://knox-tn.mygovonline.com/api/v2"
 REQUEST_DELAY_MIN = 1.0
 REQUEST_DELAY_MAX = 2.0
 
@@ -2198,7 +2151,7 @@ def enrich_obituary_data(
             skipped += 1
             continue
 
-        city = notice.city.strip() or "Knoxville"
+        city = notice.city.strip() or ""
         found = False
 
         for search_name in search_names[:2]:  # Primary + secondary (joint owner)
@@ -2444,7 +2397,7 @@ def enrich_obituary_data(
                             continue
 
                         search_name = names[0]
-                        city = notice.city.strip() or "Knoxville"
+                        city = notice.city.strip() or ""
 
                         result = await ancestry_enricher.lookup_deceased(
                             page, name=search_name, city=city, state="TN"
@@ -2473,7 +2426,7 @@ def enrich_obituary_data(
                     # Enrich Ancestry hits with DuckDuckGo obituary text for heir extraction
                     for notice, raw_name, is_tax_name, result in ancestry_match_data:
                         confirmed_name = result.get("full_name", "")
-                        city = notice.city.strip() or "Knoxville"
+                        city = notice.city.strip() or ""
                         source_url = result.get("source_url", "")
                         source_type = "ancestry"
 
@@ -2548,11 +2501,11 @@ def enrich_obituary_data(
     snippet_dm_count = 0
     no_dm_possible_count = 0
     estate_fallback_count = 0
-    dm_addr_sources = {"knox_tax_api": 0, "people_search": 0,
+    dm_addr_sources = {"people_search": 0,
                        "ddg_people_search": 0, "inline_tracerfy": 0, "batch_tracerfy": 0}
 
     for j, (notice, parsed, url, source_type, raw_name, is_tax_name) in enumerate(matches, 1):
-        city = notice.city.strip() or "Knoxville"
+        city = notice.city.strip()
         survivors = parsed.get("survivors", [])
         has_survivors = bool(survivors) or bool(parsed.get("executor_named", ""))
 
@@ -2625,7 +2578,7 @@ def enrich_obituary_data(
                 "source": "probate_notice",
                 "rank": 1,
                 "street": notice.owner_street,
-                "city": notice.owner_city or "Knoxville",
+                "city": notice.owner_city or "",
                 "state": "TN",
                 "zip": notice.owner_zip,
             }]
@@ -2871,7 +2824,7 @@ def enrich_obituary_data(
                 "source": "estate_fallback",
                 "rank": 1,
                 "street": notice.address,
-                "city": notice.city or "Knoxville",
+                "city": notice.city or "",
                 "state": "TN",
                 "zip": notice.zip,
             }]
@@ -2958,7 +2911,7 @@ def enrich_obituary_data(
                 # Tier 4: Property address fallback (DM #1 only — others left empty)
                 if dm is ranked_dms[0] and dm.get("source") != "estate_fallback":
                     dm["street"] = notice.address
-                    dm["city"] = notice.city or "Knoxville"
+                    dm["city"] = notice.city or ""
                     dm["state"] = "TN"
                     dm["zip"] = notice.zip
                     dm_addr_sources["property_fallback"] = (

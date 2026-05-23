@@ -345,70 +345,12 @@ def run_enrichment_pipeline(
         logger.warning("No records remaining after filtering")
         return notices
 
-    # ── Step 3c: Probate Property Lookup ────────────────────────────
-    # For probate records without a property address, search Knox Tax API
-    # by the decedent's name to find their property.
-    probate_no_addr = [
-        n for n in notices
-        if n.notice_type == "probate"
-        and not n.address.strip()
-        and n.decedent_name.strip()
-        and n.county.lower() == "knox"
-    ]
-    if probate_no_addr:
-        logger.info("── Step 3c: Probate Property Lookup (%d candidates) ──", len(probate_no_addr))
-        try:
-            from tax_enricher import _probate_property_lookup
-            _probate_property_lookup(probate_no_addr)
-            found = sum(1 for n in probate_no_addr if n.address.strip())
-            logger.info("  Property address found: %d/%d", found, len(probate_no_addr))
-        except ImportError:
-            logger.warning("  _probate_property_lookup not available — skipping")
-        except Exception as e:
-            logger.warning("  Probate property lookup failed: %s", e)
-
-    # ── Step 4: Parcel Address Lookup ────────────────────────────────
-    if not opts.skip_parcel_lookup and not opts.skip_tax:
-        candidates = [
-            n
-            for n in notices
-            if n.parcel_id.strip() and n.county.lower() == "knox"
-        ]
-        if candidates:
-            logger.info(
-                "── Step 4: Parcel Address Lookup (%d candidates) ──",
-                len(candidates),
-            )
-            try:
-                from tax_enricher import lookup_parcel_addresses
-
-                lookup_parcel_addresses(notices)
-            except ImportError:
-                logger.warning("  tax_enricher not available — skipping")
-            except Exception as e:
-                logger.warning("  Parcel address lookup failed: %s", e)
-        else:
-            logger.info("── Step 4: Parcel Address Lookup (no candidates) ──")
-    elif opts.skip_parcel_lookup:
-        logger.info("── Step 4: Parcel Address Lookup (skipped) ──")
-
-    # ── Step 5: Tax Delinquency ──────────────────────────────────────
-    if not opts.skip_tax and not opts.has_tax:
-        logger.info("── Step 5: Tax Delinquency Enrichment ──")
-        try:
-            from tax_enricher import enrich_tax_delinquency
-
-            enrich_tax_delinquency(notices)
-            enriched = sum(1 for n in notices if n.tax_delinquent_years)
-            logger.info("  Tax-delinquent: %d/%d", enriched, len(notices))
-        except ImportError:
-            logger.warning("  tax_enricher not available — skipping")
-        except Exception as e:
-            logger.warning("  Tax enrichment failed: %s", e)
-    elif opts.has_tax:
-        logger.info("── Step 5: Tax Delinquency (preserved — data already present) ──")
-    elif opts.skip_tax:
-        logger.info("── Step 5: Tax Delinquency (skipped) ──")
+    # ── Step 3c / 4 / 5: TN-specific Knox parcel + tax lookups (archived) ──
+    # These steps used the Knox County tax API (knox-tn.mygovonline.com) via
+    # tax_enricher.py — both now live in src/_legacy_tn/. PropertyRadar exports
+    # already include parcel ID, address, and equity; tax-delinquency for VA/MD
+    # comes from PR's own list filters. If a future state needs a parallel
+    # county-tax bridge, re-introduce it here behind a `n.state` check.
 
     # ── Step 6: Smarty Address Standardization ───────────────────────
     if not opts.skip_smarty and not opts.has_smarty:
