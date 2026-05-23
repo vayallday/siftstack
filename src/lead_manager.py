@@ -99,8 +99,10 @@ def _score_reason(row: dict) -> PillarScore:
         except ValueError:
             pass
 
-    # Hot: foreclosure, tax sale, probate (deceased), high tax delinquency
-    hot_types = {"foreclosure", "tax_sale", "probate", "code_violation"}
+    # Hot: foreclosure, tax sale, probate (deceased), pre_probate (PR
+    # deceased-owner signal — high motivation, same as court probate),
+    # code_violation, high tax delinquency
+    hot_types = {"foreclosure", "tax_sale", "probate", "pre_probate", "code_violation"}
     if notice_type in hot_types or deceased or has_tax:
         reason = []
         if notice_type in hot_types:

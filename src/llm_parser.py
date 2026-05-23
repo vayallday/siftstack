@@ -258,7 +258,7 @@ async def auto_detect_notice_type(
 
         valid_types = {
             "foreclosure", "tax_sale", "tax_delinquent", "probate",
-            "eviction", "code_violation", "divorce",
+            "eviction", "code_violation", "divorce", "pre_probate",
         }
         if detected not in valid_types:
             logger.warning("LLM detected unknown notice type: %s", detected)

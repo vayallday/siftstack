@@ -23,10 +23,13 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# Valid notice types that can appear in folder paths
+# Valid notice types that can appear in folder paths.
+# `pre_probate` is a PropertyRadar-only signal (no court filing), but the
+# folder is accepted here for symmetry — operator could drop a courthouse
+# photo of a pre-probate referral into the same Dropbox path scheme.
 VALID_NOTICE_TYPES = {
     "foreclosure", "tax_sale", "tax_delinquent", "probate",
-    "eviction", "code_violation", "divorce",
+    "eviction", "code_violation", "divorce", "pre_probate",
 }
 # Counties are not restricted — any county folder name in Dropbox is accepted.
 # Previously hardcoded to Knox/Blount; now supports any market.
