@@ -117,16 +117,91 @@ def test_default_lookback_is_seven_days_ago():
     assert prc.default_lookback_date() in acceptable
 
 
-# ── Selector placeholders are still sentinels (Plan 03 hasn't run) ──
+# ── Selectors captured in Plan 02-03 (replaces the original sentinel test) ──
+#
+# Each SEL_PR_* constant is either a real DOM selector OR a deliberate
+# fail-loud sentinel string. The sentinels (prefixed/suffixed with __)
+# document features that DON'T exist in PR's UI (N/A) or aren't yet
+# captured (TBD); any puller code that tries to use one as a CSS selector
+# will fail loudly in the Playwright call log rather than silently no-op.
 
-def test_sel_pr_constants_are_sentinels():
-    sel_attrs = [a for a in dir(prc) if a.startswith("SEL_PR_")]
-    assert sel_attrs, "no SEL_PR_* constants found"
-    for attr in sel_attrs:
-        val = getattr(prc, attr)
-        # Plan 03 will replace these with real DOM selectors and this
-        # test will be updated then. Until then, every placeholder must
-        # equal the sentinel — surfaces accidental partial-capture.
-        assert val == prc._SENTINEL, (
-            f"{attr} = {val!r} — expected sentinel until Plan 03 captures it"
+_REAL_SELECTORS = {
+    "SEL_PR_LOGIN_EMAIL",
+    "SEL_PR_LOGIN_PASSWORD",
+    "SEL_PR_LOGIN_AGREEMENT",
+    "SEL_PR_LOGIN_SUBMIT",
+    "SEL_PR_DASHBOARD_SENTINEL",
+    "SEL_PR_LIST_NAV",
+    "SEL_PR_FILTER_BTN",
+    "SEL_PR_EXPORT_MENU",
+    "SEL_PR_EXPORT_TO_FILE",
+    "SEL_PR_FIELD_SET_PICKER",
+    "SEL_PR_FIELD_SET_OPTION",
+    "SEL_PR_EXPORT_CONTINUE",
+    "SEL_PR_EXPORT_PURCHASE",
+    "SEL_PR_DOWNLOAD_MODAL",
+    "SEL_PR_EXPORT_CSV_RADIO",
+    "SEL_PR_EXPORT_DOWNLOAD",
+    "SEL_PR_LIST_ROW",
+}
+_EXPECTED_SENTINELS = {
+    "SEL_PR_NEW_SINCE_FILTER": "__N_A_PR_HAS_NO_ADDED_DATE_FILTER__",
+    "SEL_PR_RESULT_COUNT": "__TBD_USE_JS_PR_GRID_STORE_COUNT_INSTEAD__",
+    "SEL_PR_DOWNLOADS_AREA": "__TBD_ASYNC_PATH_NOT_YET_CAPTURED__",
+    "SEL_PR_ROW_RADAR_ID": "__USE_JS_PR_GRID_STORE_RADARIDS__",
+    "SEL_PR_PAGINATION_NEXT": "__N_A_PR_GRID_IS_INFINITE_SCROLL__",
+    "SEL_PR_PAGINATION_INFO": "__N_A_PR_GRID_IS_INFINITE_SCROLL__",
+}
+
+
+def test_real_sel_pr_constants_are_non_sentinel_strings():
+    """Every selector listed in _REAL_SELECTORS must be a real DOM string."""
+    for attr in _REAL_SELECTORS:
+        val = getattr(prc, attr, None)
+        assert isinstance(val, str) and val, f"{attr} missing or empty"
+        assert not (val.startswith("__") and val.endswith("__")), (
+            f"{attr} = {val!r} — still a sentinel; should hold a real selector"
         )
+
+
+def test_sentinel_sel_pr_constants_match_documented_values():
+    """Sentinels for N/A or TBD selectors must use the documented strings —
+    the puller's failure-mode assertions key off these exact values."""
+    for attr, expected in _EXPECTED_SENTINELS.items():
+        val = getattr(prc, attr, None)
+        assert val == expected, (
+            f"{attr} = {val!r} — expected sentinel {expected!r}"
+        )
+
+
+def test_sel_pr_constants_are_all_accounted_for():
+    """Every SEL_PR_* constant must be classified as either real or sentinel —
+    a new constant added without classifying it should fail this guard."""
+    declared = _REAL_SELECTORS | set(_EXPECTED_SENTINELS)
+    actual = {a for a in dir(prc) if a.startswith("SEL_PR_")}
+    extra = actual - declared
+    missing = declared - actual
+    assert not extra, f"unclassified SEL_PR_* constants: {sorted(extra)}"
+    assert not missing, f"missing SEL_PR_* constants: {sorted(missing)}"
+
+
+def test_js_snippets_present_and_callable_strings():
+    """The page.evaluate() snippets used in place of unreachable selectors
+    must exist and be non-empty strings — actual JS validity is verified
+    against the live PR app, not in unit tests."""
+    for attr in ("JS_PR_TICK_USER_AGREEMENT",
+                 "JS_PR_GRID_STORE_RADARIDS",
+                 "JS_PR_GRID_STORE_COUNT"):
+        val = getattr(prc, attr, None)
+        assert isinstance(val, str) and val.strip(), f"{attr} missing or empty"
+
+
+def test_pr_field_set_name_is_set():
+    """PR_FIELD_SET_NAME points to a saved User Fieldset in the PR account."""
+    assert isinstance(prc.PR_FIELD_SET_NAME, str) and prc.PR_FIELD_SET_NAME.strip()
+
+
+def test_pr_lists_url_uses_hash_route():
+    """PR is a hash-routed SPA — PR_LISTS_URL must include the #!/myLists
+    fragment so the puller's in-app nav lands on the right view."""
+    assert "#!/myLists" in prc.PR_LISTS_URL

@@ -8,9 +8,18 @@ config.load_state for per-list `last_seen` persistence (PR-03).
 Coexistence guarantee (PR-07): every state file path here is distinct
 from src/config.py's TN paths (last_run.json, cookies.json).
 
-Selector constants (SEL_PR_*) are placeholders — Plan 03 (selector capture
-session) will fill them with real PropertyRadar DOM strings before Plan 04
-consumes them.
+Selector constants (SEL_PR_*) were captured from live PropertyRadar HTML
+dumps during Plan 02-03 (see .planning/phases/02-propertyradar-puller/
+captured-selectors.py for source provenance + the page-*.html captures
+each selector was verified against). Each selector pins to stable anchors
+only — `name`, `data-qtip`, `role`, `data-ref`, stable `x-*` / `fr-*`
+classes, and visible text via :has-text — NEVER ExtJS auto-ids (those
+rotate on every page load).
+
+Sentinel values like "__N_A_*__" and "__TBD_*__" mean the constant is
+deliberately not a real selector (see comment beside each); any puller
+code that tries to use one as a CSS selector will fail loudly with a
+helpful message in the call log.
 """
 
 import logging
@@ -43,45 +52,139 @@ PR_COOKIES_FILE = PROJECT_ROOT / "pr_cookies.json"
 
 
 # ── Site URLs ──────────────────────────────────────────────────────
-# Mirrors src/config.py L68-70. PR_LOGIN_URL / PR_LISTS_URL specific
-# path components captured during Plan 03 exploration may differ — the
-# puller (Plan 04) must navigate by clicking nav elements where possible
-# and only fall back to these URLs when needed.
+# PropertyRadar is a hash-routed ExtJS SPA — there is no real /login or
+# /lists path. The root URL serves the login form when unauthenticated,
+# and routes to the app via hash fragments after login.
 PR_BASE_URL = "https://app.propertyradar.com"
-PR_LOGIN_URL = f"{PR_BASE_URL}/login"           # confirmed during Plan 03 exploration
-PR_LISTS_URL = f"{PR_BASE_URL}/lists"           # placeholder — verify in Plan 03
+PR_LOGIN_URL = PR_BASE_URL                          # PR auto-redirects to login when unauthed
+PR_LISTS_URL = f"{PR_BASE_URL}/#!/myLists"          # hash route — set in-app, never page.reload()
+                                                    # (a full reload drops the session)
 
 
-# ── DOM Selectors (placeholders — filled in Plan 03) ───────────────
-# Mirrors src/config.py L72-91 pattern (selectors as named constants,
-# never inline in puller code so UI changes are one find-and-replace away).
-# Plan 03 is a checkpoint:human-verify session where the operator runs
-# Playwright in headed mode against the live PR app and captures these.
-# Until then, sentinel value "__CAPTURE_IN_PLAN_03__" makes any accidental
-# use in Plan 04 code fail loudly.
-_SENTINEL = "__CAPTURE_IN_PLAN_03__"
-SEL_PR_LOGIN_EMAIL = _SENTINEL
-SEL_PR_LOGIN_PASSWORD = _SENTINEL
-SEL_PR_LOGIN_SUBMIT = _SENTINEL
-SEL_PR_DASHBOARD_SENTINEL = _SENTINEL   # element only present when logged in (for _is_session_valid)
-SEL_PR_LIST_NAV = _SENTINEL             # link/button that selects a list by name
-SEL_PR_NEW_SINCE_FILTER = _SENTINEL     # calendar picker for "Added to List >= date"
-SEL_PR_RESULT_COUNT = _SENTINEL         # the "N properties" read-back (Pitfall 1 guard)
-SEL_PR_EXPORT_MENU = _SENTINEL          # "..." menu
-SEL_PR_EXPORT_TO_FILE = _SENTINEL       # "Export to File" menu item
-SEL_PR_FIELD_SET_PICKER = _SENTINEL     # "SiftStack Export" saved field set dropdown
-SEL_PR_EXPORT_CONTINUE = _SENTINEL      # Continue button on export wizard
-SEL_PR_EXPORT_PURCHASE = _SENTINEL      # final "Purchase" / commit button (BILLED action)
-SEL_PR_EXPORT_CSV_RADIO = _SENTINEL     # CSV format selector
-SEL_PR_EXPORT_DOWNLOAD = _SENTINEL      # Download button (sync path)
-SEL_PR_DOWNLOADS_AREA = _SENTINEL       # in-app downloads/inbox area (async fallback)
+# ── DOM Selectors (captured live in Plan 02-03) ────────────────────
+# See module docstring for the stability rule. Provenance for each
+# selector is in .planning/phases/02-propertyradar-puller/captured-selectors.py.
 
-# Membership scrape selectors (PR-08 — free pagination read of list RadarIDs,
-# no export billing). Captured in Plan 03 alongside the export-wizard selectors.
-SEL_PR_LIST_ROW = _SENTINEL             # one row in the list table (will be queried as page.locator(...).all())
-SEL_PR_ROW_RADAR_ID = _SENTINEL         # RadarID cell within a row (relative selector)
-SEL_PR_PAGINATION_NEXT = _SENTINEL      # "Next page" button in the list pagination
-SEL_PR_PAGINATION_INFO = _SENTINEL      # "1-20 of N" pagination info text (used to detect last page)
+# Login (ExtJS form on the login page)
+SEL_PR_LOGIN_EMAIL     = 'input[name="userEmail"]'
+SEL_PR_LOGIN_PASSWORD  = 'input[name="userPW"]'
+SEL_PR_LOGIN_AGREEMENT = 'input[name="userAgreement"]'      # MUST be ticked
+#   before login — the submit button is `x-btn-disabled` until it's set.
+#   The native input is visually hidden, so toggle via ExtJS:
+#   use JS_PR_TICK_USER_AGREEMENT below, not a Playwright .click().
+SEL_PR_LOGIN_SUBMIT    = 'a.x-btn:has-text("Login")'
+#   ExtJS <a class="x-btn">, label text is "Login" (one word). No <button>.
+
+# Dashboard sentinel — non-empty inner text means we're logged in. CAUTION:
+# ExtJS instantiates this <label> empty on the login page too, so a bare
+# .count() gives a false positive — check inner_text() != "".
+SEL_PR_DASHBOARD_SENTINEL = 'label.fr-account-name'
+
+# List navigation — templated per list. {name} = exact PR list name.
+SEL_PR_LIST_NAV = '.list-name[data-qtip="{name}"]'
+
+# Filter button (toolbar) — opens the in-grid search box (NOT a criteria
+# filter panel). Kept because dump_pages.py uses it to capture the toolbar
+# state; the puller itself shouldn't need it.
+SEL_PR_FILTER_BTN = 'a.x-btn[data-qtip="Filter results"]'
+
+# Added-Date / "New since" filter — DOES NOT EXIST in PR's UI (user-confirmed).
+# The puller's delta strategy is full membership scrape + RadarID set diff,
+# not filter-then-export. See:
+#   .planning memory: propertyradar-no-added-date-filter
+SEL_PR_NEW_SINCE_FILTER = "__N_A_PR_HAS_NO_ADDED_DATE_FILTER__"
+
+# Result count — there is no "N properties" element in the list grid (PR
+# uses a buffered/infinite-scroll grid). For PR-08 "done scrolling"
+# detection, use JS_PR_GRID_STORE_COUNT below instead.
+SEL_PR_RESULT_COUNT = "__TBD_USE_JS_PR_GRID_STORE_COUNT_INSTEAD__"
+
+# Export wizard — SINGLE page. Field-set picker, Continue, and Purchase
+# all live on the same screen. Purchase is the direct action; Continue is
+# captured for completeness but not used in the puller's normal flow. The
+# CSV/XLSX format choice happens in the modal that opens AFTER Purchase.
+# See memory: propertyradar-export-wizard-single-page
+SEL_PR_EXPORT_MENU       = 'a.x-btn.fr-text-icon-button:has(.icon-pr-more):has-text("Actions")'
+SEL_PR_EXPORT_TO_FILE    = '[role="menuitem"]:has-text("Export to File")'
+SEL_PR_FIELD_SET_PICKER  = (                          # anchored off the label
+    'xpath=//span[contains(@class,"labels")]'         # text — the combo has
+    '[contains(.,"Export Field Set")]'                # no stable id.
+    '/following::input[@role="combobox"][1]'
+)
+SEL_PR_FIELD_SET_OPTION  = '.x-boundlist-item:has-text("{name}")'   # templated;
+#   {name} = the saved field-set's exact display name, default PR_FIELD_SET_NAME.
+SEL_PR_EXPORT_CONTINUE   = 'a[role="button"]:has-text("Continue")'
+SEL_PR_EXPORT_PURCHASE   = 'a[role="button"]:has-text("Purchase")'   # opens the
+#   Download modal — does NOT consume quota. Quota is consumed when the modal's
+#   Download button is clicked.
+
+# Download modal (opens after Purchase)
+SEL_PR_DOWNLOAD_MODAL    = '[id^="downloadExporFile-"]'              # id prefix is
+#   stable; the numeric suffix changes per session.
+SEL_PR_EXPORT_CSV_RADIO  = '.x-form-cb-label:has-text("Comma delimited")'
+#   ExtJS styled radio — the native input is visually hidden, so click the
+#   label to toggle. The other option in the modal is "Excel (.xlsx)".
+SEL_PR_EXPORT_DOWNLOAD   = (
+    '[id^="downloadExporFile-"] '
+    'a[role="button"]:has-text("Download")'
+)   # scoped to the modal; renders x-btn-disabled until a format radio is picked.
+
+# In-app downloads / inbox area for the ASYNC export path (large lists
+# delivered via email + queue) — not yet captured; the captured sync
+# Download button covers small lists. Capture when a list ever hits the
+# async threshold.
+SEL_PR_DOWNLOADS_AREA = "__TBD_ASYNC_PATH_NOT_YET_CAPTURED__"
+
+# List membership scrape (PR-08)
+SEL_PR_LIST_ROW = 'tr.x-grid-row'        # use page.locator(...).all() to enumerate
+
+# RadarID extraction is NOT a CSS selector. PropertyRadar's grid renders the
+# "Radar ID" column with display:none even when the user adds it to the view
+# (verified May 2026), so no <td> cells are emitted. Read directly from the
+# ExtJS grid Store via JS_PR_GRID_STORE_RADARIDS instead. Do NOT use the row
+# table's `data-recordid` — values like 3074/3075 are ExtJS internal store
+# indexes, not RadarIDs. See memory: propertyradar-radarid-column
+SEL_PR_ROW_RADAR_ID = "__USE_JS_PR_GRID_STORE_RADARIDS__"
+
+# Pagination — PR's grid is buffered/infinite-scroll, not paginated. There
+# is no Next button and no "1-20 of N" element. Scroll the grid until
+# store.getCount() stabilises. See memory: propertyradar-no-added-date-filter
+SEL_PR_PAGINATION_NEXT = "__N_A_PR_GRID_IS_INFINITE_SCROLL__"
+SEL_PR_PAGINATION_INFO = "__N_A_PR_GRID_IS_INFINITE_SCROLL__"
+
+
+# ── In-page JS snippets (page.evaluate(), not page.locator()) ──────
+# Use these where a DOM selector won't work — clicks on visually-hidden
+# ExtJS controls, ExtJS-model writes that bypass styled wrappers, and
+# reads from the ExtJS Store independent of column visibility.
+
+JS_PR_TICK_USER_AGREEMENT = (
+    "Ext.ComponentQuery.query('[name=userAgreement]')[0].setValue(true)"
+)
+
+JS_PR_GRID_STORE_RADARIDS = """
+(() => {
+    const grids = Ext.ComponentQuery.query('grid');
+    const g = grids.find(g => g.isVisible && g.isVisible());
+    if (!g) return null;
+    return g.getStore().getData().items.map(r => r.data.RadarID);
+})()
+"""
+
+JS_PR_GRID_STORE_COUNT = """
+(() => {
+    const grids = Ext.ComponentQuery.query('grid');
+    const g = grids.find(g => g.isVisible && g.isVisible());
+    return g ? g.getStore().getCount() : null;
+})()
+"""
+
+
+# ── Export configuration ───────────────────────────────────────────
+# The PR-side field set the puller picks in the export wizard. Must
+# exist as a saved User Fieldset in the PropertyRadar account (created
+# manually one time — see plan 02-03 task notes for the field list).
+PR_FIELD_SET_NAME = "SiftStack Export"
 
 
 # ── List Configuration (locked per DEC-pr-lists) ───────────────────
@@ -127,11 +230,13 @@ PROPERTYRADAR_LISTS: list[PropertyRadarList] = [
 ]
 
 
-# ── Billing-Disaster Guard Thresholds (per RESEARCH Pitfall 1) ─────
-# Read by the puller (Plan 04) BEFORE clicking "Purchase". If the filter
-# was set correctly and we're pulling a daily delta, the read-back count
-# should be well under this. A higher value almost certainly means the
-# filter failed silently and we're about to re-export a full list.
+# ── Daily-Delta Sanity Guard ───────────────────────────────────────
+# Read by the puller BEFORE the Purchase + Download in the export modal.
+# Since PR has no Added-Date filter, the delta comes from the membership
+# scrape diffing against the previous run's RadarID set. A delta larger
+# than this threshold almost certainly means the previous state file is
+# stale/missing and the puller is about to re-export an entire list —
+# halt and require manual confirmation rather than burn export quota.
 PR_DAILY_DELTA_MAX_RECORDS = int(os.getenv("PR_DAILY_DELTA_MAX_RECORDS", "500"))
 
 
