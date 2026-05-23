@@ -31,6 +31,7 @@ from datasift_core import dismiss_popups
 from notice_parser import NoticeData
 from propertyradar_config import (
     JS_PR_GRID_STORE_COUNT,
+    JS_PR_GRID_STORE_LOADED_CHECK,
     JS_PR_GRID_STORE_RECORDS,
     JS_PR_TICK_USER_AGREEMENT,
     LIFECYCLE_ACTIVE,
@@ -231,6 +232,103 @@ async def login(page: Page, _retries: int = 3) -> bool:
     return False
 
 
+# ── Wait for the list grid's BufferedStore to finish its initial load ─
+
+# Snapshot a single integer that identifies the currently-visible grid
+# (Ext gives each grid component a unique numeric id like 1763). The
+# integer is parsed out of the component id string `gridPreview-1763`.
+_JS_VISIBLE_GRID_TOKEN = """
+(() => {
+    const grids = Ext.ComponentQuery.query('grid');
+    const g = grids.find(g => g.isVisible && g.isVisible());
+    if (!g) return null;
+    return {grid_id: g.id || null};
+})()
+"""
+
+_JS_STORE_LOAD_STATE = """
+(() => {
+    const grids = Ext.ComponentQuery.query('grid');
+    const g = grids.find(g => g.isVisible && g.isVisible());
+    if (!g) return {ready: false, reason: 'no-grid'};
+    const store = g.getStore();
+    if (!store) return {ready: false, reason: 'no-store'};
+    const loading = !!store.loading;
+    const totalCount = typeof store.getTotalCount === 'function'
+        ? store.getTotalCount() : (store.totalCount || 0);
+    const count = typeof store.getCount === 'function' ? store.getCount() : 0;
+    const requestEnd = store.lastRequestEnd || 0;
+    // Ready iff: not loading AND (we know the totalCount OR we received
+    // at least one response from the server). A genuinely empty list
+    // resolves as totalCount=0, count=0, requestEnd>0, loading=false.
+    const ready = !loading && (totalCount > 0 || requestEnd > 0 || count > 0);
+    return {ready, loading, totalCount, count, requestEnd, grid_id: g.id};
+})()
+"""
+
+
+async def _wait_for_list_grid_loaded(
+    page: Page,
+    pr_list: "PropertyRadarList",
+    *,
+    previous_grid_id: Optional[str] = None,
+    timeout_s: float = 20.0,
+) -> dict:
+    """Poll the visible grid's BufferedStore until its initial fetch settles.
+
+    Critical when navigating between lists: the OLD list's grid stays
+    momentarily visible after the URL hash changes, and its store
+    reports `loading=false` from the PREVIOUS fetch. A naive "is the
+    store ready?" check returns true on the wrong grid and the scrape
+    that follows sees the wrong (or zero) data.
+
+    The fix: if `previous_grid_id` is provided, wait until the visible
+    grid's id is DIFFERENT (i.e., PR has torn down the old grid and
+    mounted the new one) before accepting `ready` as truthful.
+
+    Returns the final state dict; logs a warning on timeout but does
+    not raise.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    last: dict = {}
+    while asyncio.get_event_loop().time() < deadline:
+        try:
+            last = await page.evaluate(_JS_STORE_LOAD_STATE)
+        except Exception:
+            last = {"ready": False, "reason": "evaluate-failed"}
+        current_grid_id = last.get("grid_id")
+        is_new_grid = (
+            previous_grid_id is None
+            or (current_grid_id and current_grid_id != previous_grid_id)
+        )
+        if is_new_grid and last.get("ready"):
+            logger.debug(
+                "List %s grid loaded: grid_id=%s prev=%s totalCount=%s count=%s",
+                pr_list.name, current_grid_id, previous_grid_id,
+                last.get("totalCount"), last.get("count"),
+            )
+            return last
+        await asyncio.sleep(0.3)
+    logger.warning(
+        "List %s: BufferedStore did not report ready+fresh-grid within %ss "
+        "(previous_grid_id=%s, last=%s) — proceeding anyway; scrape will "
+        "surface the actual state.",
+        pr_list.name, timeout_s, previous_grid_id, last,
+    )
+    return last
+
+
+async def _current_visible_grid_id(page: Page) -> Optional[str]:
+    """Snapshot the currently-visible grid's component id (e.g.
+    `gridPreview-1763`). Used as the `previous_grid_id` baseline for
+    `_wait_for_list_grid_loaded` on the NEXT list iteration."""
+    try:
+        out = await page.evaluate(_JS_VISIBLE_GRID_TOKEN)
+        return (out or {}).get("grid_id") if out else None
+    except Exception:
+        return None
+
+
 # ── Membership scrape (the canonical delta source) ──────────────────
 
 async def _scroll_until_store_stable(page: Page) -> int | None:
@@ -258,20 +356,69 @@ async def _scroll_until_store_stable(page: Page) -> int | None:
     return previous_count
 
 
-async def _scrape_list_records(page: Page) -> dict[str, dict]:
+async def _scrape_list_records(
+    page: Page,
+    load_timeout_s: float = 60.0,
+    poll_interval_s: float = 0.5,
+) -> dict[str, dict]:
     """Scrape the full set of records (keyed by RadarID) from the open list view.
 
     Returns a dict like:
         {"P12345": {"Address": "...", "City": "...", ..., "Owner": "..."}, ...}
 
-    The full record (not just the RadarID) is needed so the puller can emit
-    synthetic exit/reentry NoticeData with the last-known address + owner
-    when a property leaves the list later. See JS_PR_GRID_STORE_RECORDS for
-    the exact field list — only essentials are persisted (full 250-field
-    records would bloat pr_state.json).
+    Two-phase strategy required by PR's BufferedStore (verified live
+    2026-05-23):
+
+      Phase 1 (prime + poll) — `JS_PR_GRID_STORE_LOADED_CHECK` calls
+        `getRange(0, total-1)` which returns the records currently in
+        cache AND triggers Ext to fetch any uncached pages. We poll the
+        snippet (which doubles as prime AND progress report) until
+        `loaded === total`, with a 60s timeout. For an empty list the
+        first call returns `{ready: true, total: 0}`.
+
+      Phase 2 (read) — once all pages are loaded into the PageMap,
+        `JS_PR_GRID_STORE_RECORDS` returns the fully-populated array
+        synchronously.
+
+    Without phase 1, `JS_PR_GRID_STORE_RECORDS` returns `[]` for lists
+    >50 records (first page only is cached on initial render).
+
+    The full record (not just the RadarID) is needed so the puller can
+    emit synthetic exit/reentry NoticeData with the last-known address +
+    owner when a property leaves the list later.
     """
     if await _scroll_until_store_stable(page) is None:
         return {}
+
+    # Phase 1: prime the BufferedStore's page cache + poll until loaded.
+    deadline = asyncio.get_event_loop().time() + load_timeout_s
+    last_loaded = -1
+    stuck_iterations = 0
+    while asyncio.get_event_loop().time() < deadline:
+        state = await page.evaluate(JS_PR_GRID_STORE_LOADED_CHECK)
+        if state.get("ready"):
+            logger.debug("BufferedStore fully loaded: %d/%d records",
+                         state.get("loaded"), state.get("total"))
+            break
+        loaded = state.get("loaded", 0)
+        total = state.get("total", 0)
+        if loaded == last_loaded:
+            stuck_iterations += 1
+            if stuck_iterations >= 8:  # 4s with poll_interval_s=0.5 and no progress
+                logger.warning(
+                    "BufferedStore load stuck at %d/%d for 4s — proceeding "
+                    "with what's cached", loaded, total,
+                )
+                break
+        else:
+            stuck_iterations = 0
+            last_loaded = loaded
+        await asyncio.sleep(poll_interval_s)
+    else:
+        logger.warning("BufferedStore did not finish loading within %ss — "
+                       "proceeding with what's cached", load_timeout_s)
+
+    # Phase 2: read the now-loaded records.
     records = await page.evaluate(JS_PR_GRID_STORE_RECORDS)
     if not records:
         return {}
@@ -565,11 +712,39 @@ async def run_list(
     today = today or datetime.now().strftime("%Y-%m-%d")
     logger.info("=== Starting list: %s ===", pr_list.name)
 
-    # 1. Click into the list.
+    # 1. Click into the list. Three-step wait — verified live 2026-05-23
+    # against all 4 production lists:
+    #   (a) wait for URL hash to leave `#!/myLists` (router commits)
+    #   (b) wait for the BufferedStore's initial page fetch to complete
+    #       (loading flag false AND a non-empty getCount, OR a positive
+    #       totalCount from the metadata response)
+    #   (c) one final beat for paint
+    # Step (b) is load-bearing: URL changes in ~100ms but the first page
+    # of the buffered store is fetched async AFTER, and _scroll_until_
+    # store_stable returns 0 immediately if it polls before that fetch.
     await _dismiss_pr_popups(page)
     list_selector = SEL_PR_LIST_NAV.replace("{name}", pr_list.name)
     await page.click(list_selector)
-    await asyncio.sleep(5)  # list view loads
+    # Wait for URL to commit, then a fixed settle window. We tried two
+    # smarter alternatives (poll BufferedStore.loading; track grid_id
+    # transitions) and both fired early — PR's app briefly re-mounts the
+    # previous list's grid during the transition, and Ext reports it as
+    # "ready" before tearing it down. A 6s sleep after the URL change is
+    # what the live diagnostic ran with successfully (all 4 lists with
+    # correct counts: 181/250/440/625 vs the smoke test's 181/0/0/0 at
+    # shorter sleeps).
+    try:
+        await page.wait_for_url(
+            lambda u: "#!/myLists/" in u and u.rstrip("/") != f"{PR_BASE_URL}/#!/myLists",
+            timeout=20_000,
+        )
+    except Exception:
+        logger.warning(
+            "List %s: URL didn't transition to #!/myLists/<name> within 20s "
+            "(currently %s) — proceeding with extra settle time as a fallback",
+            pr_list.name, page.url,
+        )
+    await asyncio.sleep(6)
     await _dismiss_pr_popups(page)
 
     # 2. Scrape current records (free — no quota).
@@ -633,6 +808,32 @@ async def run_list(
     return new_notices + exit_notices + reentry_notices, new_registry
 
 
+# ── In-app navigation back to the My Lists root ──────────────────────
+
+async def _goto_my_lists(page: Page, timeout_ms: int = 15_000) -> None:
+    """Navigate to the My Lists root in-app, NEVER reload (drops session).
+
+    Sets the hash and waits for the URL to land exactly at `#!/myLists`
+    (not `#!/myLists/<some-list>` — that's a list-detail view). Verified
+    live on 2026-05-23: bare `await asyncio.sleep(4)` after the hash
+    write was not enough on some transitions — the next list-nav click
+    fired before the My Lists view had re-mounted, leading to spurious
+    empty counts. Waiting on the URL is deterministic.
+    """
+    await page.evaluate("window.location.hash = '#!/myLists'")
+    try:
+        await page.wait_for_url(
+            lambda u: u.rstrip("/").endswith("#!/myLists"),
+            timeout=timeout_ms,
+        )
+    except Exception:
+        logger.debug("URL didn't settle at #!/myLists in %dms — proceeding",
+                     timeout_ms)
+    # The My Lists panel renders the list-nav elements asynchronously even
+    # after the URL settles. One extra beat catches that.
+    await asyncio.sleep(2)
+
+
 # ── Session-expiry recovery ──────────────────────────────────────────
 
 async def _try_relogin(page: Page) -> bool:
@@ -642,9 +843,7 @@ async def _try_relogin(page: Page) -> bool:
     logger.warning("PR session expired — attempting re-login")
     if await login(page):
         logger.info("PR re-login successful")
-        # Re-navigate to My Lists in-app.
-        await page.evaluate("window.location.hash = '#!/myLists'")
-        await asyncio.sleep(4)
+        await _goto_my_lists(page)
         return True
     logger.error("PR re-login failed")
     return False
@@ -704,8 +903,7 @@ async def pull_all_lists(
             await _save_cookies(ctx)
 
         # Navigate to My Lists (in-app, NEVER reload).
-        await page.evaluate("window.location.hash = '#!/myLists'")
-        await asyncio.sleep(6)
+        await _goto_my_lists(page)
 
         today_iso = datetime.now().strftime("%Y-%m-%d")
 
@@ -764,8 +962,7 @@ async def pull_all_lists(
                                  pr_list.name)
 
             # Return to My Lists between iterations (in-app, no reload).
-            await page.evaluate("window.location.hash = '#!/myLists'")
-            await asyncio.sleep(4)
+            await _goto_my_lists(page)
 
         await browser.close()
 

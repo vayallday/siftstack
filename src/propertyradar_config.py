@@ -192,6 +192,38 @@ JS_PR_GRID_STORE_COUNT = """
 })()
 """
 
+# Prime the BufferedStore's page cache + report load progress.
+#
+# Verified live 2026-05-23: PR uses a buffered/PageMap store. `getCount()`
+# returns `totalCount` from the server's metadata response, so it stabilises
+# almost immediately. But that's distinct from "the records are loaded" —
+# the first `store.getRange(0, count-1)` call returns `[]` and asynchronously
+# kicks off the page fetches that the range needs. Subsequent calls return
+# the real records as the pages settle.
+#
+# Returning {ready, loaded, total} lets the Python caller poll until
+# loaded === total (with a timeout), then scrape with confidence.
+JS_PR_GRID_STORE_LOADED_CHECK = """
+(() => {
+    const grids = Ext.ComponentQuery.query('grid');
+    const g = grids.find(g => g.isVisible && g.isVisible());
+    if (!g) return {ready: false, reason: 'no-grid'};
+    const store = g.getStore();
+    if (!store) return {ready: false, reason: 'no-store'};
+    const total = typeof store.getCount === 'function' ? store.getCount() : 0;
+    if (!total) return {ready: true, loaded: 0, total: 0};
+    // Calling getRange both READS what's cached AND triggers Ext to
+    // fetch any uncached pages — so this snippet doubles as the prime.
+    const records = store.getRange(0, total - 1);
+    let loaded = 0;
+    for (let i = 0; i < records.length; i++) {
+        const r = records[i];
+        if (r && r.data && r.data.RadarID) loaded++;
+    }
+    return {ready: loaded === total, loaded, total};
+})()
+"""
+
 # Used by the puller's exit-detection fold (formerly plan 02-07). Returns a
 # compact list of last-known property fields per loaded row, so the puller can
 # preserve enough metadata to emit synthetic exit/reentry NoticeData when a
