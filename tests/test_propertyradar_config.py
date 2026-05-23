@@ -62,6 +62,23 @@ def test_slugs_are_unique():
     assert len(set(slugs)) == len(slugs), f"duplicate slugs: {slugs}"
 
 
+def test_pr_notice_types_all_mapped_to_datasift_list():
+    """Every notice_type used by PR lists must have a DataSift list mapping.
+
+    If this fails, records of that notice_type upload to DataSift with an
+    empty "Lists" column and silently fall out of every niche-sequential
+    preset. Add the missing notice_type → list-name entry to
+    datasift_formatter.NOTICE_TYPE_TO_LIST.
+    """
+    from datasift_formatter import NOTICE_TYPE_TO_LIST
+    pr_types = {l.notice_type for l in prc.PROPERTYRADAR_LISTS}
+    missing = pr_types - set(NOTICE_TYPE_TO_LIST)
+    assert not missing, (
+        f"PR notice_types missing from NOTICE_TYPE_TO_LIST: {sorted(missing)}. "
+        f"Records of these types will upload with an empty Lists column."
+    )
+
+
 # ── Coexistence (PR-07) ──────────────────────────────────────────
 
 def test_state_files_distinct_from_tn():

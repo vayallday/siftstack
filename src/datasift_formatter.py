@@ -212,9 +212,17 @@ def _split_name(full_name: str) -> tuple[str, str]:
 
 # Map notice_type → DataSift list name for niche sequential marketing.
 # DataSift auto-creates lists from CSV if they don't exist yet.
+#
+# Every notice_type used by PROPERTYRADAR_LISTS in propertyradar_config
+# MUST appear here — otherwise NOTICE_TYPE_TO_LIST.get(...) returns "" and
+# the records upload with an empty "Lists" column, which excludes them
+# from every niche-sequential preset (silent breakage). The cross-module
+# invariant is guarded by
+#   tests/test_propertyradar_config.py::test_pr_notice_types_all_mapped_to_datasift_list.
 NOTICE_TYPE_TO_LIST = {
     "foreclosure": "Foreclosure",
     "probate": "Probate",
+    "pre_probate": "Pre-Probate",
     "tax_sale": "Tax Sale",
     "tax_delinquent": "Tax Delinquent",
     "eviction": "Eviction",
