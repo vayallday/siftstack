@@ -64,6 +64,11 @@ from propertyradar_config import (
     save_pr_state,
 )
 from propertyradar_parser import parse_pr_csv
+from propertyradar_quota import (
+    QuotaExceededError,
+    can_export,
+    record_export,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -583,9 +588,18 @@ async def run_list(
         pr_list.name, len(delta), len(exit_notices), len(reentry_notices),
     )
 
-    # 4. Quota guard — may raise QuotaGuardError. Only counts the brand-new
-    # delta (exits/reentries don't consume export quota, they're synthetic).
+    # 4a. Per-run quota guard — catches the "stale state file dumps the full
+    # list" regression. May raise QuotaGuardError. Counts only the brand-new
+    # delta (exits/reentries don't consume export quota — they're synthetic).
     await _quota_guard(pr_list, delta)
+
+    # 4b. Monthly-cumulative quota guard (PR-09). Orthogonal to _quota_guard:
+    # that one catches "this run wants to do something insane"; this one
+    # catches "this run is fine but you've spent 9,500 of 10,000 records
+    # this month already". `can_export` reads pr_quota.json at call-time.
+    allowed, reason = can_export(len(delta), today=today)
+    if not allowed:
+        raise QuotaExceededError(reason)
 
     new_notices: list[NoticeData] = []
     if delta:
@@ -605,6 +619,12 @@ async def run_list(
             "List %s: parsed %d records from export, kept %d matching delta",
             pr_list.name, len(all_notices), len(new_notices),
         )
+        # Record the actual delivered count AFTER the download succeeds, so
+        # the cumulative-month counter tracks delivery and not intent (T-02-08-01).
+        # `len(delta)` is the same value `can_export` saw above, and matches
+        # what PR billed against (filtering on RadarID was local; PR delivered
+        # the full delta — that's what counts).
+        record_export(len(delta), list_name=pr_list.name, today=today)
     else:
         logger.info("List %s: empty new-RadarID delta — skipping export (saves quota)",
                     pr_list.name)
@@ -707,8 +727,14 @@ async def pull_all_lists(
                     page, pr_list, previous_registry, download_dir, today=today_iso,
                 )
                 all_notices.extend(list_notices)
-            except QuotaGuardError:
-                logger.error("Quota guard fired — aborting all remaining lists")
+            except (QuotaGuardError, QuotaExceededError) as exc:
+                # Wholesale-abort on either guard:
+                #   QuotaGuardError    = per-run sanity (stale state file)
+                #   QuotaExceededError = cumulative-month budget hit (PR-09)
+                # Both signal "stop spending quota on this run" — continuing
+                # to the next list would only consume more.
+                logger.error("Quota guard fired (%s) — aborting all remaining lists: %s",
+                             type(exc).__name__, exc)
                 quota_disaster = True
                 break
             except Exception:

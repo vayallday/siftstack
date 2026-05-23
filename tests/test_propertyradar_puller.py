@@ -360,6 +360,164 @@ def test_coerce_list_registry_passes_through_v2_dict():
     assert pp._coerce_list_registry(v2, today="2026-05-23") is v2
 
 
+# ── PR-09: monthly quota integration (can_export + record_export) ──
+
+@pytest.mark.asyncio
+async def test_run_list_raises_quota_exceeded_when_can_export_blocks(
+    monkeypatch, tmp_path,
+):
+    """When can_export returns (False, reason), run_list must raise
+    QuotaExceededError BEFORE invoking _export_delta — protects the
+    monthly budget from being spent past the configured ceiling."""
+    page = MagicMock()
+    page.click = AsyncMock()
+    page.evaluate = AsyncMock()
+    monkeypatch.setattr(pp, "_dismiss_pr_popups", AsyncMock())
+    # 3 brand-new RadarIDs (delta would consume 3 records)
+    monkeypatch.setattr(
+        pp, "_scrape_list_records",
+        AsyncMock(return_value={
+            "10": {"Address": "10 Oak"},
+            "11": {"Address": "11 Oak"},
+            "12": {"Address": "12 Oak"},
+        }),
+    )
+    # _export_delta must NOT run when the monthly guard blocks
+    ed = AsyncMock()
+    monkeypatch.setattr(pp, "_export_delta", ed)
+    # record_export must NOT run either (no successful download to record)
+    rec = MagicMock()
+    monkeypatch.setattr(pp, "record_export", rec)
+    # Pretend the monthly budget is fully consumed
+    monkeypatch.setattr(
+        pp, "can_export",
+        lambda count, today=None: (False, "Would exceed monthly budget: ..."),
+    )
+
+    with pytest.raises(pp.QuotaExceededError, match="Would exceed monthly budget"):
+        await pp.run_list(
+            page,
+            PropertyRadarList("L", "VA", "foreclosure", "L"),
+            previous_registry={},
+            download_dir=tmp_path,
+            today="2026-05-23",
+        )
+    ed.assert_not_called()
+    rec.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_list_records_export_after_successful_download(
+    monkeypatch, tmp_path,
+):
+    """record_export must fire AFTER the export wizard returns a CSV — the
+    counter tracks delivered records, not intent (T-02-08-01 mitigation)."""
+    page = MagicMock()
+    page.click = AsyncMock()
+    page.evaluate = AsyncMock()
+    monkeypatch.setattr(pp, "_dismiss_pr_popups", AsyncMock())
+    monkeypatch.setattr(
+        pp, "_scrape_list_records",
+        AsyncMock(return_value={"42": {"Address": "42 Pine"}}),
+    )
+    # _export_delta returns a CSV path; parser yields 1 NoticeData matching the delta
+    csv = tmp_path / "fake.csv"
+    csv.write_text("RadarID\n42\n", encoding="utf-8")
+    monkeypatch.setattr(pp, "_export_delta", AsyncMock(return_value=csv))
+    from notice_parser import NoticeData
+    monkeypatch.setattr(
+        pp, "parse_pr_csv",
+        lambda path, notice_type: [NoticeData(
+            date_added="2026-05-23", address="42 Pine", city="", state="VA",
+            zip="", owner_name="", notice_type=notice_type, county="",
+            source_url="propertyradar://radarid/42",
+        )],
+    )
+    monkeypatch.setattr(
+        pp, "can_export", lambda count, today=None: (True, ""),
+    )
+
+    rec_calls: list[dict] = []
+    def fake_record(count, list_name="", today=None):
+        rec_calls.append({"count": count, "list_name": list_name, "today": today})
+    monkeypatch.setattr(pp, "record_export", fake_record)
+
+    notices, _ = await pp.run_list(
+        page,
+        PropertyRadarList("L", "VA", "foreclosure", "vaslug"),
+        previous_registry={},
+        download_dir=tmp_path,
+        today="2026-05-23",
+    )
+    assert len(notices) == 1
+    assert rec_calls == [{"count": 1, "list_name": "L", "today": "2026-05-23"}], (
+        f"record_export must be called exactly once with the delta size; got {rec_calls}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_list_does_not_record_export_when_delta_empty(
+    monkeypatch, tmp_path,
+):
+    """No download happened → no quota was consumed → record_export must NOT
+    be called. Otherwise we'd double-charge the monthly counter every empty run."""
+    page = MagicMock()
+    page.click = AsyncMock()
+    page.evaluate = AsyncMock()
+    monkeypatch.setattr(pp, "_dismiss_pr_popups", AsyncMock())
+    monkeypatch.setattr(
+        pp, "_scrape_list_records",
+        AsyncMock(return_value={"1": {"Address": "1 Main"}}),
+    )
+    monkeypatch.setattr(pp, "_export_delta", AsyncMock())
+    monkeypatch.setattr(pp, "can_export", lambda count, today=None: (True, ""))
+    rec = MagicMock()
+    monkeypatch.setattr(pp, "record_export", rec)
+
+    prev = {"1": _active_record("1", "1 Main")}  # already-known → empty delta
+    notices, _ = await pp.run_list(
+        page,
+        PropertyRadarList("L", "VA", "foreclosure", "vaslug"),
+        previous_registry=prev,
+        download_dir=tmp_path,
+        today="2026-05-23",
+    )
+    assert notices == []
+    rec.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pull_all_lists_aborts_on_quota_exceeded(monkeypatch, tmp_path):
+    """QuotaExceededError from the monthly guard must trigger the SAME
+    wholesale-abort behaviour as QuotaGuardError — once you're over the
+    cumulative budget, exporting the next list only wastes more quota."""
+    monkeypatch.setattr(pp, "save_pr_state", lambda _: None)
+    monkeypatch.setattr(pp, "load_pr_state", lambda: {})
+
+    called: list[str] = []
+
+    async def fake_run_list(page, pr_list, prev, dd, today=None):
+        called.append(pr_list.slug)
+        if pr_list.slug == "overbudget":
+            raise pp.QuotaExceededError("monthly cap hit")
+        return [], {}
+
+    monkeypatch.setattr(pp, "run_list", fake_run_list)
+    monkeypatch.setattr(pp, "_is_session_valid", AsyncMock(return_value=True))
+    monkeypatch.setattr(pp, "_try_relogin", AsyncMock(return_value=False))
+    _stub_async_playwright(monkeypatch)
+
+    lists = [
+        PropertyRadarList("one", "VA", "foreclosure", "one"),
+        PropertyRadarList("two", "VA", "foreclosure", "overbudget"),
+        PropertyRadarList("three", "MD", "foreclosure", "three"),
+    ]
+    await pp.pull_all_lists(lists=lists, download_dir=tmp_path)
+    assert called == ["one", "overbudget"], (
+        f"after QuotaExceededError on list 2, list 3 must NOT run. called={called}"
+    )
+
+
 # ── _download_export: async-path TBD escalation ────────────────────
 
 @pytest.mark.asyncio

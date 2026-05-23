@@ -558,6 +558,18 @@ async def actor_main() -> None:
                         cost_breakdown=cost_breakdown,
                     )
 
+                    # PR-09: append the monthly PropertyRadar quota line so the
+                    # operator sees consumed/budget at a glance after every run.
+                    # Only meaningful when --source propertyradar; the function
+                    # reads pr_quota.json which only PR runs ever write to.
+                    if source == "propertyradar":
+                        try:
+                            from propertyradar_quota import format_quota_summary
+                            _send_webhook(format_quota_summary())
+                        except Exception as quota_exc:
+                            Actor.log.debug("Could not append PR quota summary: %s",
+                                            quota_exc, exc_info=True)
+
                     # Send DataSift CSV download links as a follow-up message
                     if datasift_csv_urls:
                         csv_lines = [
@@ -1949,6 +1961,16 @@ def _run_scrape_pipeline(args, searches) -> None:
         from slack_notifier import send_slack_notification
 
         send_slack_notification(notices, upload_result=upload_result)
+
+        # PR-09: append the monthly PropertyRadar quota line for --source
+        # propertyradar runs so the operator sees consumed/budget at a glance.
+        if (getattr(args, "source", None) or "tnpn").lower() == "propertyradar":
+            try:
+                from propertyradar_quota import format_quota_summary
+                from slack_notifier import _send_webhook
+                _send_webhook(format_quota_summary())
+            except Exception:
+                logging.debug("Could not append PR quota summary", exc_info=True)
 
     # Audit DataSift for incomplete records (future daily check)
     if getattr(args, "audit_records", False):
