@@ -1,28 +1,30 @@
-"""12-preset niche sequential marketing system with 3-day cycle orchestration.
+"""Niche sequential marketing helpers — channel exports + a one-entry preset manifest.
 
-Implements the DataSift niche sequential marketing workflow:
-  Day 1: Text → Call → Trigger mailer
-  Day 2: Call (different script) → Text variation
-  Day 3: Final call → Final text → Mailer arrives
+Operator's real DataSift cycle (channel order):
+  skip trace → SMS → cold call (3 follow-ups) → mail → DP escalations → recycle
 
-Channels escalate by cost: SMS ($0.01) → Call ($0.03-0.06) → Mail ($0.50-2.00) → Deep Prospecting ($1.50-4.00)
+Channels escalate by cost: SMS ($0.01) → Call ($0.03-0.06) → Mail ($0.50-2.00) → Deep Prospecting ($1.50-4.00).
+`export_sms_list` / `export_call_list` / `export_mail_list` emit channel-ready CSVs
+filtered out of DataSift; `export_sms_list` switches to heir-aware templates when
+`notice_type == "pre_probate"` so SMS to deceased-owner records addresses the heir.
 
-13 filter presets in "00 Niche Sequential Marketing" folder:
-  00. Needs Skip Traced
-  01. Ready to Text
-  02-04. Needs Called Day 1/2/3
-  05. Needs Mailed
-  06. Needs Deep Prospecting
-  07. Callback Scheduled
-  08. Hot Lead
-  09. Not Interested
-  10. Bad Data
-  11. Completed Cycle
-  12. Pre-Probate Heir Discovery (gates pre_probate without confirmed DM out of SMS/call)
+The live DataSift `00. NICHE SEQUENTIAL` folder is owned by the operator and
+contains 14 presets (00..13) that this module does NOT mirror in code — they are
+authored and maintained directly in DataSift's UI. PRESETS below is a one-entry
+manifest of the SINGLE preset SiftStack adds:
+
+  14. Pre-Probate → DP (NEW — pushes pre_probate-tagged records to deep prospecting
+       for heir research; created in Phase 3 of v1.0)
+
+Historical note: an earlier version of this docstring described a 12-preset
+SMS-first cycle (Needs Skip Traced / Ready to Text / Needs Called Day 1-3 / ...)
+that was never synced to DataSift. That manifest was aspirational and has been
+removed. The real cycle (call-first with an SMS step between skip-trace and
+calls) is documented in CLAUDE.md and lives in DataSift's UI as the source-of-truth.
 
 Usage:
-  python src/main.py niche-sequential --list-name "Foreclosure" --channel sms --day 1
-  python src/main.py niche-sequential --action setup-presets
+  python src/main.py niche-sequential --list-name "Pre-Probate" --channel sms --day 1
+  python src/main.py niche-sequential --action setup-presets   # informational
 """
 
 import csv
@@ -37,105 +39,26 @@ logger = logging.getLogger(__name__)
 
 # ── Preset definitions ────────────────────────────────────────────────
 
-PRESET_FOLDER = "00 Niche Sequential Marketing"
+# Live folder name in DataSift (case + punctuation exact).
+PRESET_FOLDER = "00. NICHE SEQUENTIAL"
 
+# PRESETS mirrors ONLY the SiftStack-added preset(s) in DataSift. The other
+# 13 presets in the folder (00. Needs Skipped, 01. Skipped No Numbers,
+# 02. Ready to Call, 03-05. Follow-Up 1-3, 06. Needs First Mail,
+# 07. Mail Monthly, 08-10. * → DP, 11. Not Interested Qrtly, 12. Rehash,
+# 13. No Valid Number → DP) are operator-owned in DataSift's UI and are
+# NOT represented here — DataSift is the source-of-truth for those.
 PRESETS = [
     {
-        "number": "00",
-        "name": "00. Needs Skip Traced",
-        "description": "New records without phone data — route to skip trace",
-        "filter": {"has_phone": False, "has_tag": "Courthouse Data"},
-        "action": "Run Tracerfy batch skip trace → phone validate via Trestle",
-    },
-    {
-        "number": "01",
-        "name": "01. Ready to Text",
-        "description": "Has phone (Dial First/Second tier), not yet texted",
-        "filter": {"has_phone": True, "phone_tier": ["Dial First", "Dial Second"],
-                   "not_tag": "sms_sent"},
-        "action": "Send Day 1 SMS via Launch Control / REISimpli",
-    },
-    {
-        "number": "02",
-        "name": "02. Needs Called Day 1",
-        "description": "Texted, not called yet — first call attempt",
-        "filter": {"has_tag": "sms_sent", "not_tag": "called_day1"},
-        "action": "Call all numbers, leave voicemail, log disposition",
-    },
-    {
-        "number": "03",
-        "name": "03. Needs Called Day 2",
-        "description": "Called once, no answer — second attempt with different script",
-        "filter": {"has_tag": "called_day1", "not_tag": "called_day2"},
-        "action": "Call with alternate script, leave new voicemail",
-    },
-    {
-        "number": "04",
-        "name": "04. Needs Called Day 3",
-        "description": "Called twice, final attempt — urgency-focused",
-        "filter": {"has_tag": "called_day2", "not_tag": "called_day3"},
-        "action": "Final call pass, urgency voicemail, final text",
-    },
-    {
-        "number": "05",
-        "name": "05. Needs Mailed",
-        "description": "Exhausted calls, ready for direct mail piece",
-        "filter": {"has_tag": "called_day3", "not_tag": "mailed"},
-        "action": "Export mail-ready CSV, send handwritten letter ($1.75)",
-    },
-    {
-        "number": "06",
-        "name": "06. Needs Deep Prospecting",
-        "description": "Mail returned / no response after full cycle",
-        "filter": {"has_tag": "cycle_complete", "not_tag": "dp_complete",
-                   "status_not": "Sold"},
-        "action": "Route to deep_prospector.py for Level 1-3 research",
-    },
-    {
-        "number": "07",
-        "name": "07. Callback Scheduled",
-        "description": "Appointment set during a call — follow up on schedule",
-        "filter": {"has_tag": "callback_scheduled"},
-        "action": "Call at scheduled time, update disposition",
-    },
-    {
-        "number": "08",
-        "name": "08. Hot Lead",
-        "description": "Expressed interest during contact — route to closer",
-        "filter": {"has_tag": "hot"},
-        "action": "Immediate closer assignment, schedule appointment",
-    },
-    {
-        "number": "09",
-        "name": "09. Not Interested",
-        "description": "Declined — schedule 90-day recycle",
-        "filter": {"has_tag": "not_interested"},
-        "action": "Tag for 90-day follow-up, rotate to different mailer type",
-    },
-    {
-        "number": "10",
-        "name": "10. Bad Data",
-        "description": "Wrong number/address — route to re-skip",
-        "filter": {"has_tag": "bad_data"},
-        "action": "Remove bad phone/address, re-run skip trace",
-    },
-    {
-        "number": "11",
-        "name": "11. Completed Cycle",
-        "description": "Full 3-day cycle done, move to nurture",
-        "filter": {"has_tag": "cycle_complete", "not_tag": "hot"},
-        "action": "Move to nurture list, schedule monthly touch",
-    },
-    {
-        "number": "12",
-        "name": "12. Pre-Probate Heir Discovery",
-        "description": "Pre-probate records (PR-deceased signal) without a confirmed DM — "
-                       "the property owner is dead and no obituary match found a living "
-                       "heir, so SMS/call to the property/owner address would be wasted",
-        "filter": {"has_tag": "pre_probate", "not_tag": "has_dm",
-                   "status_not": "Sold"},
+        "number": "14",
+        "name": "14. Pre-Probate → DP",
+        "description": "Pre-probate records (PR-deceased signal) — owner is dead per "
+                       "property records, so route to deep prospecting for heir "
+                       "research before any contact channel fires. Matches the "
+                       "operator's '→ DP' naming convention used by presets 08-10/13.",
+        "filter": {"has_tag": "pre_probate", "status_not": "Sold"},
         "action": "Route to deep_prospector.py for Level 1-3 heir research; "
-                  "gate downstream contact presets (01-05) on has_dm",
+                  "downstream contact presets re-enter once a DM is identified.",
     },
 ]
 

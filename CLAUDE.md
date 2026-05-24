@@ -228,7 +228,7 @@ DataSift.ai (formerly REISift) is the CRM where scraped records land for niche s
 - **Custom fields (15):** Notice Type, County, Date Added, Owner Deceased, Date of Death, Decedent Name, Decision Maker, DM Relationship, DM Confidence, DM 2/3 Name/Relationship, Obituary URL, Source URL
 
 ### Niche Sequential Marketing
-DataSift's niche sequential system uses filter presets to guide records through SMS → Call → Mail → Deep Prospecting phases. Two preset folders: "00 Niche Sequential Marketing" (13 presets, courthouse data) and "01. Bulk Sequential Marketing" (9 presets, bulk data). All 22 presets exclude Sold status (build 1.0.23+). Preset 12 (`Pre-Probate Heir Discovery`) gates PR-sourced pre_probate records that have no confirmed DM — they route to deep_prospector for heir research before any SMS/call, since the property owner is dead. A "Sold Property Cleanup" sequence in the Transactions folder auto-fires on "Sold" tag to change status, remove from lists, clear tasks, and clear assignee.
+DataSift's niche sequential system uses filter presets to guide records through skip-trace → SMS → Call (3 follow-ups) → Mail → Deep Prospecting phases. Two preset folders: "00. NICHE SEQUENTIAL" (14 presets, courthouse data) and "01. Bulk Sequential Marketing" (9 presets, bulk data). The "00. NICHE SEQUENTIAL" folder is owned by the operator in DataSift's UI and is the source-of-truth for those 14 presets — `src/niche_sequential.py` PRESETS only mirrors SiftStack-added presets (currently just `14. Pre-Probate → DP`). All presets exclude Sold status (build 1.0.23+). Preset 14 (`Pre-Probate → DP`) routes PR-sourced pre_probate records to deep_prospector for heir research before any contact channel fires, since the property owner is dead. A "Sold Property Cleanup" sequence in the Transactions folder auto-fires on "Sold" tag to change status, remove from lists, clear tasks, and clear assignee.
 
 - **"Courthouse Data" tag:** Every record gets this tag — signals first-to-market county data (prioritized over bulk data in filter presets)
 - **Lists column:** Maps `notice_type` → DataSift list name (`foreclosure` → "Foreclosure", `probate` → "Probate", `pre_probate` → "Pre-Probate", `tax_sale` → "Tax Sale", `tax_delinquent` → "Tax Delinquent", `eviction` → "Eviction", `code_violation` → "Code Violation", `divorce` → "Divorce"). DataSift auto-creates lists from CSV.
@@ -318,8 +318,9 @@ Hard-won patterns from build 1.0.22-1.0.23 (SiftMap, preset management, sequence
 - Flow: open filter panel → scroll to bottom → expand "Filter Presets" → expand folder → click preset → modify → Save (not Save New) → confirm overwrite
 - Folder names have case variations ("00 Niche" vs "00 NICHE") — use `.toUpperCase()` comparison
 - Preset names follow pattern `^\d{2}\.` (e.g., "00. Needs Skipped")
-- 2 folders: "00 Niche Sequential Marketing" (13 presets), "01. Bulk Sequential Marketing" (9 presets)
-- All 22 presets have Property Status "Do not include" → "Sold" (build 1.0.23+)
+- 2 folders: "00. NICHE SEQUENTIAL" (14 presets), "01. Bulk Sequential Marketing" (9 presets)
+- All 23 presets have Property Status "Do not include" → "Sold" (build 1.0.23+)
+- The "00. NICHE SEQUENTIAL" cycle is call-first with an SMS step between skip-trace and calls: `00. Needs Skipped → 01. Skipped No Numbers → SMS step (via sequence) → 02. Ready to Call → 03-05. Follow-Up 1/2/3 → 06. Needs First Mail → 07. Mail Monthly → 08-10. * → DP → 11. Not Interested Qrtly → 12. Rehash → 13. No Valid Number → DP → 14. Pre-Probate → DP`. The 13 base presets (00-13) are operator-owned in DataSift's UI; code mirrors only the SiftStack-added preset 14.
 
 **Sequence Builder Workflow**
 - Flow: `/sequences` → Create → title + folder → drag trigger → condition → actions tab → drag actions → configure → save
@@ -380,7 +381,7 @@ Distribution-ready Claude Co-Work skill files at `Skills for REI/improved/`. Eac
 
 These values are identical across all skills that reference them:
 - **Phone tiers:** 81-100 (Dial First), 61-80 (Dial Second), 41-60 (Dial Third), 21-40 (Dial Fourth), 0-20 (Drop)
-- **Preset folders:** "00 Niche Sequential Marketing" (13 presets — preset 12 added for pre_probate heir-discovery routing), "01. Bulk Sequential Marketing" (9 presets)
+- **Preset folders:** "00. NICHE SEQUENTIAL" (14 presets, operator-owned in DataSift UI; SiftStack code only mirrors `14. Pre-Probate → DP`), "01. Bulk Sequential Marketing" (9 presets)
 - **Sequence count:** 26 TCA templates across 5 folders (Lead Management 6, Acquisitions 6, Transactions 6, Deep Prospecting 4, Default 4)
 - **Comp adjustments:** Bedroom $5,000, Bathroom $7,500, $/sqft $85, Age $500/yr (from `comp_analyzer.py`)
 - **Financing defaults:** HML 12%, conventional 7%, 2 points, 2.5% closing (from `deal_analyzer.py`)

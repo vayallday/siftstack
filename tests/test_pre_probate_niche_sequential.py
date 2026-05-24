@@ -1,14 +1,25 @@
-"""Phase 3 SC #5 / NT-05 — pre_probate records flow through a documented
-preset in the `00 Niche Sequential Marketing` folder, and the SMS template
-used for those records addresses the heir rather than the deceased owner.
+"""Phase 3 SC #5 / NT-05 — `14. Pre-Probate → DP` preset + heir-aware SMS templates.
 
-Two failure modes these tests guard against:
-  1. PRESETS list drifts and the pre_probate preset disappears (no
-     designated landing-zone for PR's deceased-owner records).
-  2. export_sms_list keeps using the property-owner template ("I noticed
-     YOUR property") for pre_probate records — wrong audience: the
-     property owner is dead and the message goes to the obituary-identified
-     heir.
+Background: an earlier version of this file asserted a 13-entry PRESETS manifest
+with a slot-12 `Pre-Probate Heir Discovery` preset. That manifest was fictional —
+the operator's real DataSift `00. NICHE SEQUENTIAL` folder has 14 call-first
+presets (00..13), with slot 12 already taken by `Rehash`. The reshape (this file)
+asserts the corrected design:
+
+  - PRESET_FOLDER mirrors DataSift's actual folder name `"00. NICHE SEQUENTIAL"`
+  - PRESETS contains exactly ONE entry: `14. Pre-Probate → DP` (the SiftStack
+    addition; the other 13 presets are operator-owned in DataSift and not mirrored)
+  - Filter is simple: `has_tag=pre_probate` + `status_not=Sold` (the `has_dm`
+    gate was dropped because that tag was never wired anywhere)
+  - `export_sms_list` still selects heir-aware templates for pre_probate records,
+    because SMS IS part of the operator's real cycle
+    (skip trace → SMS → cold call → mail → DP)
+
+Two failure modes guarded here:
+  1. PRESETS drifts away from the single documented preset or the folder constant
+     changes without DataSift being updated to match.
+  2. `export_sms_list` reverts to property-owner framing ("YOUR property") for
+     pre_probate records, sending the wrong message to the obituary-identified heir.
 """
 
 import csv
@@ -20,75 +31,86 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
-# ── PRESETS list invariants ─────────────────────────────────────────
+# ── PRESETS manifest invariants ─────────────────────────────────────
 
 def test_pre_probate_preset_exists():
     from niche_sequential import PRESETS
-    pre_probate = [p for p in PRESETS if p["number"] == "12"]
+    pre_probate = [p for p in PRESETS if p["number"] == "14"]
     assert len(pre_probate) == 1, (
-        "Exactly one preset 12 must exist as the pre_probate designated "
-        "landing zone (NT-05). Found: "
+        "Exactly one preset 14 must exist (the SiftStack-added "
+        "`14. Pre-Probate → DP`). Found: "
         f"{[p['name'] for p in pre_probate]}"
     )
-    assert pre_probate[0]["name"] == "12. Pre-Probate Heir Discovery", (
-        f"Preset 12 name drifted: {pre_probate[0]['name']!r}. The Phase 3 "
-        f"requirement docs the preset by name."
+    assert pre_probate[0]["name"] == "14. Pre-Probate → DP", (
+        f"Preset 14 name drifted: {pre_probate[0]['name']!r}. Must match "
+        f"the operator's `→ DP` convention exactly to align with the real "
+        f"DataSift folder entry."
     )
 
 
-def test_pre_probate_preset_in_canonical_folder():
+def test_preset_folder_matches_real_datasift_name():
     from niche_sequential import PRESET_FOLDER
-    assert PRESET_FOLDER == "00 Niche Sequential Marketing", (
-        f"PRESET_FOLDER drifted to {PRESET_FOLDER!r}. NT-05 requires the "
-        f"pre_probate preset live in `00 Niche Sequential Marketing`."
+    assert PRESET_FOLDER == "00. NICHE SEQUENTIAL", (
+        f"PRESET_FOLDER drifted to {PRESET_FOLDER!r}. NT-05 requires "
+        f"alignment with DataSift's actual folder name '00. NICHE SEQUENTIAL'."
     )
 
 
-def test_pre_probate_preset_filter_targets_deceased_without_dm():
-    """Filter must match pre_probate records that DON'T have a confirmed
-    DM — the population that needs heir research before any contact
-    attempt. Records WITH a confirmed DM should fall through to the
-    standard 01-05 contact presets."""
+def test_pre_probate_preset_filter_is_simple():
+    """Filter targets every pre_probate record except Sold ones, no gating
+    on vapor tags. Refinement (e.g., excluding records already in active
+    cycle, or those with a confirmed DM) can layer in later once the
+    corresponding tags actually exist in DataSift."""
     from niche_sequential import PRESETS
-    preset = next(p for p in PRESETS if p["number"] == "12")
+    preset = next(p for p in PRESETS if p["number"] == "14")
     f = preset["filter"]
     assert f.get("has_tag") == "pre_probate", (
         f"Filter must positively target pre_probate via has_tag. "
         f"Filter: {f}"
     )
-    assert f.get("not_tag") == "has_dm", (
-        f"Filter must exclude records with a confirmed DM (those flow "
-        f"through 01-05). Filter: {f}"
-    )
     assert f.get("status_not") == "Sold", (
-        f"All niche-sequential presets exclude Sold status (build 1.0.23 "
+        f"Niche sequential presets exclude Sold status (build 1.0.23 "
         f"invariant). Filter: {f}"
+    )
+    assert "has_dm" not in str(f), (
+        f"Filter must NOT reference the `has_dm` tag — that tag was "
+        f"designed but never wired (no code emits it). Keep the filter "
+        f"simple until/unless the tag becomes real. Filter: {f}"
     )
 
 
 def test_pre_probate_preset_action_routes_to_deep_prospector():
     from niche_sequential import PRESETS
-    preset = next(p for p in PRESETS if p["number"] == "12")
+    preset = next(p for p in PRESETS if p["number"] == "14")
     assert "deep_prospector" in preset["action"].lower(), (
-        f"Action must route to deep_prospector for heir research, since "
-        f"contact channels are pointless until a living DM is identified. "
+        f"Action must route to deep_prospector for heir research. "
         f"Action: {preset['action']!r}"
     )
 
 
-def test_baseline_13_presets_present():
-    """Regression: adding preset 12 must not drop any of the existing 12."""
+def test_presets_manifest_only_contains_sift_stack_additions():
+    """PRESETS mirrors ONLY the SiftStack-added preset(s) — not the 13
+    operator-owned presets in DataSift's UI. This boundary keeps PRESETS
+    honest: when an entry is here, it's a contract between SiftStack code
+    and what we expect to live in DataSift; when an entry isn't here,
+    DataSift owns it."""
     from niche_sequential import PRESETS
     numbers = [p["number"] for p in PRESETS]
-    assert numbers == ["00", "01", "02", "03", "04", "05", "06", "07",
-                       "08", "09", "10", "11", "12"], (
-        f"PRESETS numbering drifted: {numbers}"
+    assert numbers == ["14"], (
+        f"PRESETS should contain exactly the SiftStack-added preset(s). "
+        f"Found: {numbers}. If a future SiftStack-owned preset is added, "
+        f"update this assertion; if a DataSift-owned operator preset got "
+        f"mirrored in here, remove it (DataSift's UI is the source-of-truth "
+        f"for those)."
     )
 
 
 # ── export_sms_list heir-aware template selection ──────────────────
 
 def test_sms_uses_heir_aware_template_for_pre_probate(tmp_path):
+    """SMS IS part of the operator's real cycle (skip trace → SMS → cold call
+    → mail → DP). When `niche-sequential --channel sms` runs for a pre_probate
+    list, the SMS template must address the heir, not the deceased owner."""
     from niche_sequential import export_sms_list
     out = tmp_path / "sms.csv"
     records = [{
@@ -101,13 +123,10 @@ def test_sms_uses_heir_aware_template_for_pre_probate(tmp_path):
     with open(out, encoding="utf-8") as f:
         row = next(csv.DictReader(f))
     msg = row["message"]
-    # Heir-aware template acknowledges the passing
     assert "passed" in msg.lower() or "family" in msg.lower(), (
         f"pre_probate SMS must use heir-aware template (acknowledges "
         f"passing or addresses family). Got: {msg!r}"
     )
-    # Property-owner template's "your property" framing is wrong for a
-    # deceased owner — must not appear.
     assert "your property" not in msg.lower(), (
         f"pre_probate SMS leaked property-owner framing 'your property' "
         f"into the heir audience. Got: {msg!r}"
