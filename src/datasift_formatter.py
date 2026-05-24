@@ -7,6 +7,15 @@ fields in the "SiftStack" custom group for deep prospecting/notice-specific data
 For deceased records, the contact (Owner First/Last + Mailing Address) is set
 to the decision maker, not the deceased owner. For living records, the contact
 is the property owner.
+
+The `Lists` column carries TWO list memberships per record (DSP-01): the
+per-notice-type list (Foreclosure, Pre-Probate, etc.) AND the additive
+`SiftStack` disposition list. Both are comma-delimited; `csv.DictWriter` with
+`QUOTE_MINIMAL` (default) auto-quotes the cell because the value contains the
+CSV column delimiter. DataSift's upload wizard then splits the quoted cell
+into two list memberships per record. See `_build_lists_value` for the
+construction logic and the SIFTSTACK_LIST_NAME / LIST_DELIMITER constants
+below for the casing + delimiter contract with DataSift's live state.
 """
 
 import csv
@@ -215,9 +224,9 @@ def _split_name(full_name: str) -> tuple[str, str]:
 #
 # Every notice_type used by PROPERTYRADAR_LISTS in propertyradar_config
 # MUST appear here — otherwise NOTICE_TYPE_TO_LIST.get(...) returns "" and
-# the records upload with an empty "Lists" column, which excludes them
-# from every niche-sequential preset (silent breakage). The cross-module
-# invariant is guarded by
+# the record uploads with ONLY the SiftStack disposition (no per-type list
+# membership), excluding it from every per-notice-type filter preset. The
+# cross-module invariant is guarded by
 #   tests/test_propertyradar_config.py::test_pr_notice_types_all_mapped_to_datasift_list.
 NOTICE_TYPE_TO_LIST = {
     "foreclosure": "Foreclosure",
@@ -229,6 +238,43 @@ NOTICE_TYPE_TO_LIST = {
     "code_violation": "Code Violation",
     "divorce": "Divorce",
 }
+
+# Additive disposition list — every record uploaded to DataSift lands in BOTH
+# its per-notice-type list (NOTICE_TYPE_TO_LIST above) AND this disposition
+# list. The operator-visible `SiftStack` list pre-exists in DataSift (created
+# manually before Phase 4); this code only references it by name.
+#
+# Casing matters — DataSift's CSV-import is case-sensitive for list names.
+# CLAUDE.md "My Defaults" originally wrote `Siftstack` but the live list is
+# `SiftStack` (two capitals); see Phase 4 closure for the reconciliation.
+SIFTSTACK_LIST_NAME = "SiftStack"
+
+# Multi-list values in the `Lists` column use a comma delimiter. The CSV
+# writer (csv.DictWriter, QUOTE_MINIMAL) auto-quotes cells containing the
+# delimiter, so e.g. `Foreclosure,SiftStack` appears as `"Foreclosure,SiftStack"`
+# in the written CSV — DataSift's upload wizard then splits the cell into
+# two list memberships.
+LIST_DELIMITER = ","
+
+
+def _build_lists_value(notice: NoticeData) -> str:
+    """Build the `Lists` column value with additive `SiftStack` disposition.
+
+    Per DSP-01: every record lands in BOTH its per-notice-type list AND the
+    `SiftStack` list. If the notice_type has no per-type mapping (or is empty),
+    the value collapses to just `SiftStack` so the record still gets the
+    disposition assignment.
+
+    Returns:
+        Comma-delimited list names. Examples:
+          foreclosure  → "Foreclosure,SiftStack"
+          pre_probate  → "Pre-Probate,SiftStack"
+          unmapped     → "SiftStack"
+    """
+    per_type = NOTICE_TYPE_TO_LIST.get(notice.notice_type, "")
+    if per_type:
+        return f"{per_type}{LIST_DELIMITER}{SIFTSTACK_LIST_NAME}"
+    return SIFTSTACK_LIST_NAME
 
 
 def _build_tags(notice: NoticeData) -> str:
@@ -703,7 +749,7 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
     """
     contact = _get_contact_info(notice)
     tags = _build_tags(notice)
-    list_name = NOTICE_TYPE_TO_LIST.get(notice.notice_type, "")
+    lists_value = _build_lists_value(notice)
     notes = notes_override if notes_override is not None else _build_notes(notice)
 
     # Conditionally map auction_date to the right built-in field
@@ -750,7 +796,7 @@ def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
         "Email 4": notice.email_4,
         "Email 5": notice.email_5,
         "Tags": tags,
-        "Lists": list_name,
+        "Lists": lists_value,
         "Notes": notes,
         # ── Built-in fields ──
         "Estimated Value": notice.estimated_value,

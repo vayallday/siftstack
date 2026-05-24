@@ -231,7 +231,7 @@ DataSift.ai (formerly REISift) is the CRM where scraped records land for niche s
 DataSift's niche sequential system uses filter presets to guide records through skip-trace → SMS → Call (3 follow-ups) → Mail → Deep Prospecting phases. Two preset folders: "00. NICHE SEQUENTIAL" (14 presets, courthouse data) and "01. Bulk Sequential Marketing" (9 presets, bulk data). The "00. NICHE SEQUENTIAL" folder is owned by the operator in DataSift's UI and is the source-of-truth for those 14 presets — `src/niche_sequential.py` PRESETS only mirrors SiftStack-added presets (currently just `14. Pre-Probate → DP`). All presets exclude Sold status (build 1.0.23+). Preset 14 (`Pre-Probate → DP`) routes PR-sourced pre_probate records to deep_prospector for heir research before any contact channel fires, since the property owner is dead. A "Sold Property Cleanup" sequence in the Transactions folder auto-fires on "Sold" tag to change status, remove from lists, clear tasks, and clear assignee.
 
 - **"Courthouse Data" tag:** Every record gets this tag — signals first-to-market county data (prioritized over bulk data in filter presets)
-- **Lists column:** Maps `notice_type` → DataSift list name (`foreclosure` → "Foreclosure", `probate` → "Probate", `pre_probate` → "Pre-Probate", `tax_sale` → "Tax Sale", `tax_delinquent` → "Tax Delinquent", `eviction` → "Eviction", `code_violation` → "Code Violation", `divorce` → "Divorce"). DataSift auto-creates lists from CSV.
+- **Lists column (additive, DSP-01):** Every record carries TWO list memberships, comma-delimited: its per-notice-type list AND the `SiftStack` disposition list. Per-type map: `foreclosure` → `"Foreclosure"`, `probate` → `"Probate"`, `pre_probate` → `"Pre-Probate"`, `tax_sale` → `"Tax Sale"`, `tax_delinquent` → `"Tax Delinquent"`, `eviction` → `"Eviction"`, `code_violation` → `"Code Violation"`, `divorce` → `"Divorce"`. Cell value example: `"Foreclosure,SiftStack"` (CSV-auto-quoted because the value contains the column delimiter `,`). Records without a notice_type still get `SiftStack` so the disposition always lands. Per-type list is FIRST segment, `SiftStack` is SECOND — DataSift auto-creates per-type lists from CSV; `SiftStack` pre-exists in the operator's account. Source-of-truth constants: `SIFTSTACK_LIST_NAME = "SiftStack"`, `LIST_DELIMITER = ","` in `src/datasift_formatter.py`.
 - **Tags:** Courthouse Data, notice_type, county, YYYY-MM date, deceased/living, DM confidence level, has_auction, tax_delinquent, photo_import (for photo-sourced records)
 
 ### Upload Wizard (5 Steps)
@@ -431,7 +431,7 @@ plugin-name.plugin (ZIP containing):
 - **Data source:** `app.propertyradar.com` (nationwide property data platform — replaces tnpublicnotice.com for VA/MD markets)
 - **Notifications:** Send daily summaries to Slack
 - **Preferred run time:** 5:00 AM
-- **Dispositions:** Send to DataSift List `Siftstack`
+- **Dispositions:** Every record additively lands in DataSift List `SiftStack` (camel-case; the list pre-exists in DataSift) AND its per-notice-type list (Foreclosure / Pre-Probate / Probate / Tax Sale / Tax Delinquent / Eviction / Code Violation / Divorce). See `src/datasift_formatter.py::_build_lists_value` for the construction logic.
 
 ### PropertyRadar Architecture Notes
 
