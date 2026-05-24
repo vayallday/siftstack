@@ -300,11 +300,24 @@ async def upload_csv(
 
     await _screenshot(page, "step1_form_filled")
 
-    # Click "Next Step" to proceed to step 2
+    # Click "Next Step" to proceed from Setup
     await _click_next_step(page, timeout=30000)
 
-    # ── Wizard Step 2: Add tags ──
-    logger.info("Wizard Step 2: Adding 'Courthouse Data' tag...")
+    # ── Wizard Step 2: Enrichment (DataSift inserted this step post-Phase-1) ──
+    # Sidebar order is now: Setup → Enrichment → Add tags → Upload the file →
+    # Map the columns → Review (6 steps, was 5). Enrichment shows configurable
+    # auto-enrich options; we accept defaults via Next Step. Discovered
+    # 2026-05-23 evening during Phase 5 smoke test — the previous 5-step
+    # assumption caused tag input + file input lookups to fail because the
+    # wizard was one step "earlier" than the code believed.
+    logger.info("Wizard Step 2: Enrichment — accepting defaults...")
+    await _dismiss_popups(page)
+    await page.wait_for_timeout(1500)
+    await _screenshot(page, "step2_enrichment")
+    await _click_next_step(page, timeout=30000)
+
+    # ── Wizard Step 3: Add tags ──
+    logger.info("Wizard Step 3: Adding 'Courthouse Data' tag...")
     await page.wait_for_timeout(1000)
     await _screenshot(page, "step2_tags")
 
@@ -373,8 +386,8 @@ async def upload_csv(
 
     await _click_next_step(page)
 
-    # ── Wizard Step 3: Upload the file ──
-    logger.info("Wizard Step 3: Uploading CSV file: %s", csv_path.name)
+    # ── Wizard Step 4: Upload the file ──
+    logger.info("Wizard Step 4: Uploading CSV file: %s", csv_path.name)
     await page.wait_for_timeout(3000)
     await _screenshot(page, "step3_before_upload")
 
@@ -405,8 +418,8 @@ async def upload_csv(
     await _screenshot(page, "step3_file_uploaded")
     await _click_next_step(page)
 
-    # ── Wizard Step 4: Map the columns ──
-    logger.info("Wizard Step 4: Column mapping — mapping Tags and Lists...")
+    # ── Wizard Step 5: Map the columns ──
+    logger.info("Wizard Step 5: Column mapping — mapping Tags and Lists...")
     await page.wait_for_timeout(3000)
     await _screenshot(page, "step4_column_mapping")
 
@@ -470,8 +483,8 @@ async def upload_csv(
     await _click_next_step(page)
     await _screenshot(page, "step4_mapping_done")
 
-    # ── Wizard Step 5: Review ──
-    logger.info("Wizard Step 5: Review and finish upload...")
+    # ── Wizard Step 6: Review ──
+    logger.info("Wizard Step 6: Review and finish upload...")
     await page.wait_for_timeout(2000)
     await _screenshot(page, "step5_review")
 
@@ -490,25 +503,43 @@ async def upload_csv(
     except Exception as e:
         logger.warning("Finish step: %s", e)
 
-    # Wait for processing confirmation
+    # Wait for processing confirmation. DataSift's post-upload behavior is to
+    # silently redirect to the Records page (URL `/records/properties`); the
+    # previous version of this code waited for a text banner like "Upload
+    # Complete" or "successfully", which DataSift no longer emits — that
+    # made every successful upload land in the "confirmation timed out"
+    # warning branch even though records had actually uploaded. Prefer URL
+    # transition as the success signal; fall back to text matching for any
+    # interstitial confirmation page.
     try:
-        success_indicator = page.locator(
-            'text="Upload Complete", '
-            'text="successfully", '
-            'text="records imported", '
-            'text="records added", '
-            'text="records uploaded"'
-        )
-        await success_indicator.first.wait_for(timeout=60000)
-        success_text = await success_indicator.first.text_content()
+        await page.wait_for_url("**/records/**", timeout=60000)
         result["success"] = True
-        result["message"] = success_text or "Upload completed"
+        result["message"] = f"Upload completed (redirected to {page.url})"
         logger.info("DataSift upload complete: %s", result["message"])
     except PwTimeout:
-        await _screenshot(page, "step5_timeout")
-        result["message"] = "Upload may have succeeded but confirmation timed out — check Activity page"
-        logger.warning(result["message"])
-        result["success"] = True
+        # URL didn't transition — try the legacy text matcher in case
+        # DataSift restored the confirmation page in a future build.
+        try:
+            success_indicator = page.locator(
+                'text="Upload Complete", '
+                'text="successfully", '
+                'text="records imported", '
+                'text="records added", '
+                'text="records uploaded"'
+            )
+            await success_indicator.first.wait_for(timeout=5000)
+            success_text = await success_indicator.first.text_content()
+            result["success"] = True
+            result["message"] = success_text or "Upload completed"
+            logger.info("DataSift upload complete (legacy text match): %s", result["message"])
+        except PwTimeout:
+            await _screenshot(page, "step6_timeout")
+            result["message"] = (
+                "Upload may have succeeded but neither URL transition nor "
+                "success text was observed — check the Activity page manually."
+            )
+            logger.warning(result["message"])
+            result["success"] = True
 
     await _save_cookies(page)
     return result

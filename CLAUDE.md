@@ -234,16 +234,17 @@ DataSift's niche sequential system uses filter presets to guide records through 
 - **Lists column (additive, DSP-01):** Every record carries TWO list memberships, comma-delimited: its per-notice-type list AND the `SiftStack` disposition list. Per-type map: `foreclosure` → `"Foreclosure"`, `probate` → `"Probate"`, `pre_probate` → `"Pre-Probate"`, `tax_sale` → `"Tax Sale"`, `tax_delinquent` → `"Tax Delinquent"`, `eviction` → `"Eviction"`, `code_violation` → `"Code Violation"`, `divorce` → `"Divorce"`. Cell value example: `"Foreclosure,SiftStack"` (CSV-auto-quoted because the value contains the column delimiter `,`). Records without a notice_type still get `SiftStack` so the disposition always lands. Per-type list is FIRST segment, `SiftStack` is SECOND — DataSift auto-creates per-type lists from CSV; `SiftStack` pre-exists in the operator's account. Source-of-truth constants: `SIFTSTACK_LIST_NAME = "SiftStack"`, `LIST_DELIMITER = ","` in `src/datasift_formatter.py`.
 - **Tags:** Courthouse Data, notice_type, county, YYYY-MM date, deceased/living, DM confidence level, has_auction, tax_delinquent, photo_import (for photo-sourced records)
 
-### Upload Wizard (5 Steps)
+### Upload Wizard (6 Steps — DataSift added Enrichment step post-Phase-1)
 1. **Setup:** Click "Upload File" sidebar → "Add Data" → dropdown "Uploading a new list not in DataSift yet" → enter list name → organization questions
-2. **Tags:** Skip through (tags are in CSV column)
-3. **Upload File:** Set file on `input[type="file"]`
-4. **Map Columns:** Core address fields auto-map; Tags, Lists, and enrichment columns may need manual mapping
-5. **Review + Finish Upload:** Click "Finish Upload" — processing happens in background
+2. **Enrichment:** Accept defaults via Next Step. New step DataSift inserted (discovered 2026-05-23 Phase 5 smoke test); previously the wizard was 5 steps. The script just clicks Next here — no per-record enrich options needed since we drive enrichment from the SiftStack pipeline.
+3. **Tags:** Add "Courthouse Data" custom tag (other tags ride along in CSV column)
+4. **Upload File:** Set file on `input[type="file"]`
+5. **Map Columns:** Core address fields auto-map; Tags, Lists, and enrichment columns may need manual mapping
+6. **Review + Finish Upload:** Click "Finish Upload" — processing happens in background
 
 ### Column Mapping Notes
 - Only core address fields (Property Street, City, State, ZIP) reliably auto-map
-- Tags, Lists, Estimated Value, and enrichment columns often stay unmapped in step 4
+- Tags, Lists, Estimated Value, and enrichment columns often stay unmapped in step 5
 - Notes and MSL Status sometimes auto-map
 - Custom fields (SiftStack custom-field group) require drag-and-drop mapping
 

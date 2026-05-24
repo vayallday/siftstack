@@ -168,16 +168,32 @@ async def login(page, email: str = None, password: str = None) -> bool:
     if await terms_label.count() > 0:
         await terms_label.first.click()
 
-    # Click Sign In
+    # Click Sign In. If the button is still disabled (because email/password
+    # weren't filled or terms checkbox didn't latch), this click is a no-op
+    # and we'd time out below — which is the correct failure path.
     await page.get_by_role("button", name="Sign In").click()
 
-    # Wait for navigation away from login page
+    # Wait for navigation away from login page. The earlier version of this
+    # function had a false-positive: if wait_for_url timed out AND the URL
+    # didn't happen to contain "/login" at that exact moment (transient
+    # state during a slow redirect, for example), it would fall through to
+    # save_cookies + return True. That masked a credential-misconfig bug on
+    # 2026-05-23 — the .env had a placeholder DATASIFT_EMAIL, login never
+    # actually completed, but the function reported success and the failure
+    # surfaced much later as "Could not find Upload File button". Be strict:
+    # if we don't land on /dashboard within the timeout, login failed.
     try:
         await page.wait_for_url("**/dashboard/general**", timeout=15000)
     except PwTimeout:
-        if "/login" in page.url:
-            logger.error("DataSift login failed — still on login page")
-            return False
+        logger.error(
+            "DataSift login failed — did not reach /dashboard/general within "
+            "15s. Final URL: %s. Check credentials in .env (DATASIFT_EMAIL / "
+            "DATASIFT_PASSWORD) and the Sign In button state (disabled means "
+            "the form's email / password / terms checkbox didn't latch).",
+            page.url,
+        )
+        await screenshot(page, "login_failed_post_signin")
+        return False
 
     await save_cookies(page)
     logger.info("DataSift login successful")

@@ -67,3 +67,9 @@ _brand_tmp/
 _tmp_skill/
 autoresearch/
 .pytest_cache/
+
+# DataSift Playwright debug screenshots — generated at the repo root with
+# `datasift_<stepname>.png` naming. Useful for diagnosing wizard failures
+# but contain visible UI state (operator name, record lists) so they should
+# never be committed.
+datasift_*.png
