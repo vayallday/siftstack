@@ -433,6 +433,10 @@ plugin-name.plugin (ZIP containing):
 - **Notifications:** Send daily summaries to Slack
 - **Preferred run time:** 5:00 AM
 - **Dispositions:** Every record additively lands in DataSift List `SiftStack` (camel-case; the list pre-exists in DataSift) AND its per-notice-type list (Foreclosure / Pre-Probate / Probate / Tax Sale / Tax Delinquent / Eviction / Code Violation / Divorce). See `src/datasift_formatter.py::_build_lists_value` for the construction logic.
+- **Buy-box filters:**
+  - `include_vacant`: **true** (operator buys vacant land — do NOT default to excluding it)
+  - `include_commercial`: `false` (residential-only)
+  - `include_entities`: `false` (filter out LLC/Corp/Trust-owned records)
 
 ### PropertyRadar Architecture Notes
 
