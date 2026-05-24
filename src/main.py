@@ -170,7 +170,8 @@ async def actor_main() -> None:
             from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline
 
             opts = PipelineOptions(
-                skip_parcel_lookup=True,  # web scrape notices don't have parcel IDs
+                # PR exports already include parcel_id (APN); skip the lookup step.
+                skip_parcel_lookup=True,
                 skip_vacant_filter=include_vacant,
                 skip_commercial_filter=include_commercial,
                 skip_entity_filter=include_entities,
@@ -288,36 +289,88 @@ async def actor_main() -> None:
             elif drive_folder_id:
                 Actor.log.warning("google_drive_folder_id set but google_service_account_key missing — skipping Drive upload")
 
-            # ── DataSift CSVs → KVS (manual upload) ─────────────────
-            # Generate DataSift-formatted CSVs and save to Apify KVS
-            # for manual download + upload to DataSift (more reliable than
-            # automated Playwright upload in headless cloud containers).
-            datasift_csv_urls = []
-            try:
-                from datasift_formatter import write_datasift_split_csvs
+            # ── DataSift: automated upload + KVS-CSV audit copy ───────
+            # Phase 5 SCH-01 (2026-05-24): replaced the previous "save to KVS
+            # for manual download + upload" flow with full automated headless
+            # Playwright upload. Validated against live DataSift in headless
+            # mode 2026-05-24 (smoke test in `.planning/phases/04-*/`),
+            # which exercises the same path used here. KVS-CSV save still
+            # runs as an audit copy + fallback so the operator can recover
+            # manually if the headless upload ever regresses on a UI change.
+            from datasift_formatter import write_datasift_split_csvs
+            from datasift_uploader import upload_datasift_split
 
+            datasift_csv_urls = []
+            upload_result = {"success": False, "message": "not attempted"}
+
+            do_upload = actor_input.get("upload_datasift", True)
+            do_enrich_ds = actor_input.get("enrich_datasift", True)
+            do_skip_trace_ds = actor_input.get("skip_trace_datasift", True)
+
+            try:
                 csv_infos = write_datasift_split_csvs(notices)
-                kvs = await Actor.open_key_value_store()
-                for info in csv_infos:
-                    key = f"datasift_{info['label'].lower().replace(' ', '_')}.csv"
-                    with open(info["path"], "rb") as f:
-                        await kvs.set_value(key, f.read(), content_type="text/csv")
-                    # Build public download URL
-                    kvs_id = kvs._id if hasattr(kvs, '_id') else ''
-                    url = f"https://api.apify.com/v2/key-value-stores/{kvs_id}/records/{key}"
-                    datasift_csv_urls.append({"label": info["label"], "url": url, "records": info.get("count", "?")})
-                    Actor.log.info("DataSift CSV (%s) saved to KVS: %s", info["label"], key)
             except Exception as e:
-                Actor.log.error("DataSift CSV generation failed: %s", e)
+                Actor.log.error("DataSift CSV generation failed: %s — skipping DataSift step entirely", e)
+                csv_infos = []
+
+            # Primary path: automated headless upload (only if credentials present + toggled on)
+            if csv_infos and do_upload and config.DATASIFT_EMAIL and config.DATASIFT_PASSWORD:
+                Actor.log.info(
+                    "DataSift automated upload — %d CSV(s), enrich=%s, skip_trace=%s",
+                    len(csv_infos), do_enrich_ds, do_skip_trace_ds,
+                )
+                try:
+                    upload_result = await upload_datasift_split(
+                        csv_infos,
+                        headless=True,
+                        enrich=do_enrich_ds,
+                        skip_trace=do_skip_trace_ds,
+                    )
+                    if upload_result.get("success"):
+                        Actor.log.info("DataSift upload OK: %s", upload_result.get("message", ""))
+                    else:
+                        Actor.log.warning(
+                            "DataSift upload reported failure: %s — KVS-CSV fallback still saved below",
+                            upload_result.get("message"),
+                        )
+                except Exception as e:
+                    Actor.log.warning(
+                        "DataSift upload raised: %s — KVS-CSV fallback still saved below", e,
+                    )
+                    upload_result = {"success": False, "message": str(e)}
+            elif csv_infos and not do_upload:
+                Actor.log.info("DataSift automated upload skipped (upload_datasift=false in input)")
+            elif csv_infos:
+                Actor.log.info(
+                    "DataSift automated upload skipped — DATASIFT_EMAIL or DATASIFT_PASSWORD not set",
+                )
+
+            # Audit copy + manual-recovery fallback: always save CSVs to KVS
+            # (regardless of upload outcome) so the operator has a record-of-truth
+            # for what was attempted and can re-upload manually if needed.
+            if csv_infos:
+                try:
+                    kvs = await Actor.open_key_value_store()
+                    kvs_id = kvs._id if hasattr(kvs, '_id') else ''
+                    for info in csv_infos:
+                        key = f"datasift_{info['label'].lower().replace(' ', '_')}.csv"
+                        with open(info["path"], "rb") as f:
+                            await kvs.set_value(key, f.read(), content_type="text/csv")
+                        url = f"https://api.apify.com/v2/key-value-stores/{kvs_id}/records/{key}"
+                        datasift_csv_urls.append({"label": info["label"], "url": url, "records": info.get("count", "?")})
+                        Actor.log.info("DataSift CSV (%s) saved to KVS: %s", info["label"], key)
+                except Exception as e:
+                    Actor.log.error("KVS audit-copy save failed: %s", e)
 
             # ── Slack Notification ────────────────────────────────────
             elapsed_min = (_time() - pipeline_start) / 60
 
             # Compute estimated run cost
+            # 2Captcha was a per-record charge under the now-archived TN scraper
+            # (see src/_legacy_tn/captcha_solver.py). PR is a fixed-monthly Solo
+            # plan with no per-record fee; export quota burn is tracked separately
+            # via pr_quota.json + the Slack quota summary line.
             cost_breakdown = {}
-            # 2Captcha: $0.003 per solve, ~1 solve per notice scraped
-            captcha_count = total  # each notice detail page requires a CAPTCHA
-            cost_breakdown["2Captcha"] = round(captcha_count * 0.003, 2)
             # Anthropic Haiku: ~$0.001 per record (LLM parsing + obituary search)
             if config.ANTHROPIC_API_KEY:
                 cost_breakdown["Anthropic (Haiku)"] = round(total * 0.001, 3)
