@@ -141,20 +141,41 @@ async def _is_session_valid(page: Page) -> bool:
     """Check whether we're authenticated.
 
     PR's login URL is the bare base URL, so URL-substring checks like
-    `"/login" in url` give false negatives. Reliable signals:
-      - if `input[type="password"]` is visible → we're on the login form
-      - if `label.fr-account-name` has non-empty text → we're logged in
-        (the label is also rendered EMPTY on the login page, so a bare
-        .count() gives a false positive).
+    `"/login" in url` give false negatives. Multi-signal OR check (any
+    positive signal means logged in):
+      1. Password input visible → definitely NOT logged in (negative gate)
+      2. URL is a post-login route (`/#!/discover`, `/#!/dashboard`, etc.)
+         → logged in (robust to PR UI updates that change CSS classes)
+      3. `label.fr-account-name` has non-empty text → logged in
+         (the label is also rendered EMPTY on the login page, so a bare
+         .count() gives a false positive).
+
+    2026-05-25: added the URL signal after PR's UI shifted the account-name
+    rendering and broke daily Apify runs (login succeeded, URL was
+    `/#!/discover`, but the fr-account-name selector returned empty text).
     """
+    # Negative gate — if password input is visible, we're on login form
     try:
         await page.locator('input[type="password"]').first.wait_for(
             state="visible", timeout=1500,
         )
-        return False  # password field showing — definitely not logged in
+        return False
     except Exception:
         pass
 
+    # Positive signal 1 — URL is a known post-login route. PR's SPA uses
+    # hash routes like `/#!/discover`, `/#!/dashboard`, `/#!/lists/...`,
+    # etc. None of these appear on the unauthenticated login page (which
+    # is the bare base URL with no hash).
+    POST_LOGIN_HASH_PREFIXES = (
+        "/#!/discover", "/#!/dashboard", "/#!/lists", "/#!/properties",
+        "/#!/account", "/#!/admin",
+    )
+    if any(p in page.url for p in POST_LOGIN_HASH_PREFIXES):
+        logger.debug("Session valid — post-login URL %s", page.url)
+        return True
+
+    # Positive signal 2 — original sentinel (kept as a backup)
     try:
         text = (await page.locator(SEL_PR_DASHBOARD_SENTINEL).first.inner_text(
             timeout=2000,
@@ -231,6 +252,20 @@ async def login(page: Page, _retries: int = 3) -> bool:
         return True
     logger.error("PR login uncertain — URL %s but session-validity check failed",
                  page.url)
+    # Drop a screenshot so we can see WHAT PR is actually showing — without
+    # this we have no diagnostic signal beyond a URL. Saved into Apify's
+    # ephemeral filesystem; surface via logs after.
+    try:
+        from datetime import datetime as _dt
+        shot = config.OUTPUT_DIR / f"pr_login_uncertain_{_dt.now():%Y%m%d_%H%M%S}.png"
+        config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        await page.screenshot(path=str(shot), full_page=True)
+        logger.error("PR login uncertain screenshot saved: %s", shot)
+        # Also dump a snippet of the visible DOM for log inspection
+        body = (await page.locator("body").inner_text(timeout=2000))[:500]
+        logger.error("PR login uncertain — body excerpt: %r", body)
+    except Exception as _e:
+        logger.debug("Could not capture login-uncertain screenshot: %s", _e)
     return False
 
 
