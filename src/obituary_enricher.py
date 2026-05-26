@@ -41,6 +41,25 @@ MAX_ADDRESS_TEXT = 15000  # Larger limit for people search pages (CBC has 250+ r
 MAX_DOD_GAP_YEARS = 3
 
 
+# State-code → full name lookup for LLM prompts. Empty string when state is
+# unknown so the prompt template doesn't print a literal "" or fall back to
+# a hardcoded value. Active states: VA + MD (SiftStack's markets). TN stays
+# in the map only so the `src/_legacy_tn/` archive can still be imported.
+_STATE_NAMES = {"VA": "Virginia", "MD": "Maryland", "TN": "Tennessee"}
+
+
+def _state_name(code: str) -> str:
+    """Map a 2-letter state code to full name for LLM prompts.
+
+    Returns the full name ("Virginia") for known codes, else the code itself
+    (so an unknown code still surfaces something), else empty string.
+    """
+    if not code:
+        return ""
+    c = code.strip().upper()
+    return _STATE_NAMES.get(c, c)
+
+
 def _dod_sanity_check(dod_str: str, notice: "NoticeData") -> bool:
     """Reject obituary matches where DOD is implausibly far from the notice date.
 
@@ -215,12 +234,12 @@ OBITUARY_PROMPT = """\
 I have a property record with this owner information:
 - Owner name: {owner_name}
 - Property city: {city}
-- Property state: Tennessee
+- Property state: {state}
 - Property address: {address}
 
 Below is text from a potential obituary. Determine if this obituary is for the same person \
 as the property owner. Consider: name match (first + last name must match; middle name/initial \
-is bonus confirmation), location match (same city or county in Tennessee), and timeline \
+is bonus confirmation), location match (same city or county in {state}), and timeline \
 plausibility (death within last 5 years is typical for active foreclosure/tax sale records).
 
 Return a JSON object with these exact keys:
@@ -407,7 +426,12 @@ def _search_obituary(name: str, city: str, extra_terms: str = "") -> list[dict]:
     Returns list of {url, title, snippet} for obituary-domain results.
     """
     keyword = extra_terms if extra_terms else "obituary"
-    query = f'{name} {keyword} Tennessee' if not city else f'{name} {keyword} {city} Tennessee'
+    # City alone is unique enough in VA/MD (Richmond, Fort Washington, Suffolk,
+    # Temple Hills, etc.); the legacy "Tennessee" qualifier was pulling 100%
+    # wrong-state results for VA/MD pre_probate records on Apify and 429ing
+    # every engine. Drop the state qualifier — let the LLM confirm geo at
+    # match-time using the {state} field in OBITUARY_PROMPT.
+    query = f'{name} {keyword}' if not city else f'{name} {keyword} {city}'
 
     try:
         results = DDGS().text(query, max_results=8, backend="google,duckduckgo,brave")
@@ -563,6 +587,7 @@ def _refetch_specific_obituary(
     original_url: str,
     api_key: str,
     address: str = "",
+    state: str = "",
 ) -> tuple[dict | None, str, str]:
     """Re-search for a specific obituary page when original match was a listing page.
 
@@ -570,7 +595,7 @@ def _refetch_specific_obituary(
     """
     queries = [
         f'"{name}" obituary site:legacy.com',
-        f'"{name}" obituary {city} Tennessee "survived by"',
+        f'"{name}" obituary {city} "survived by"',
     ]
 
     for query in queries:
@@ -598,6 +623,7 @@ def _refetch_specific_obituary(
                 city=city,
                 address=address,
                 api_key=api_key,
+                state=state,
             )
             if parsed and parsed.get("confidence") in ("high", "medium"):
                 logger.info("  Re-search found specific obituary: %s", url)
@@ -658,10 +684,10 @@ def _search_survivors_targeted(
     Returns list of survivor dicts [{name, relationship}] or empty list.
     """
     queries = [
-        f'"{name}" "survived by" {city} Tennessee',
-        f'"{name}" "preceded in death" {city} Tennessee',
+        f'"{name}" "survived by" {city}',
+        f'"{name}" "preceded in death" {city}',
         f'"{name}" obituary wife OR husband OR son OR daughter {city}',
-        f'"{name}" funeral OR memorial service {city} Tennessee',
+        f'"{name}" funeral OR memorial service {city}',
     ]
 
     all_snippets = []
@@ -769,22 +795,22 @@ ADDRESS_EXTRACT_PROMPT = """\
 Extract the current residential mailing address for this person from the web page text.
 
 Person: {name}
-Expected area: {city}, Tennessee (or nearby)
+Expected area: {city}, {state} (or nearby)
 
 Instructions:
 1. The page may list MULTIPLE people. Scan ALL result blocks to find the one that \
-best matches "{name}" in {city}, Tennessee.
+best matches "{name}" in {city}, {state}.
 2. Within that block, prefer the "Lives at" or "Current address" over "Used to live" addresses.
 3. If you find an exact name + state match, return it even if the city differs slightly \
-(people move within Tennessee).
-4. If multiple exact matches exist (common name), pick the Tennessee address closest \
+(people move within {state}).
+4. If multiple exact matches exist (common name), pick the {state} address closest \
 to {city}.
 5. If no confident match exists, return empty strings — do not guess.
 
 Return ONLY valid JSON with these exact keys:
 - "street": street address (e.g., "1234 Oak Street") — empty string if not found
 - "city": city name — empty string if not found
-- "state": 2-letter state code — "TN" if Tennessee
+- "state": 2-letter state code matching the property state ({state_code})
 - "zip": 5-digit zip code — empty string if not found
 - "confidence": "high" if name+state match found, "medium" if likely match, "low" if uncertain
 
@@ -792,17 +818,21 @@ Web page text:
 {page_text}"""
 
 
-def _lookup_dm_address_web(name: str, city: str, api_key: str) -> dict | None:
+def _lookup_dm_address_web(name: str, city: str, api_key: str, state: str = "") -> dict | None:
     """Search free people search sites for DM's residential address.
 
     Uses DuckDuckGo to find pages on people search sites, then Claude Haiku
-    to extract the address from page content.
+    to extract the address from page content. `state` is the property state
+    (e.g. "VA") so the LLM extraction prompt and any future query qualifiers
+    use the right geography.
     """
-    # Targeted people search query
+    # Targeted people search query — drop hardcoded state qualifier so VA/MD
+    # records aren't searched against TN people-search pages. State is now
+    # threaded into ADDRESS_EXTRACT_PROMPT so the LLM still resolves geo.
     site_filter = " OR ".join(f"site:{d}" for d in list(PEOPLE_SEARCH_DOMAINS)[:4])
     queries = [
-        f'"{name}" {city} Tennessee {site_filter}',
-        f'"{name}" Tennessee address {city}',
+        f'"{name}" {city} {site_filter}',
+        f'"{name}" address {city}',
     ]
 
     for query in queries:
@@ -826,9 +856,12 @@ def _lookup_dm_address_web(name: str, city: str, api_key: str) -> dict | None:
                 continue
 
             # LLM extraction
+            state_code = (state or "").strip().upper()
             prompt = ADDRESS_EXTRACT_PROMPT.format(
                 name=name,
                 city=city or "",
+                state=_state_name(state_code) or "unknown",
+                state_code=state_code or "—",
                 page_text=page_text[:MAX_OBITUARY_TEXT],
             )
             try:
@@ -841,7 +874,7 @@ def _lookup_dm_address_web(name: str, city: str, api_key: str) -> dict | None:
                         return {
                             "street": street,
                             "city": parsed.get("city", ""),
-                            "state": parsed.get("state", "TN"),
+                            "state": parsed.get("state", state_code),
                             "zip": parsed.get("zip", ""),
                         }
             except Exception as e:
@@ -854,7 +887,7 @@ def _lookup_dm_address_web(name: str, city: str, api_key: str) -> dict | None:
     return None
 
 
-def _build_people_search_urls(name: str, city: str) -> list[str]:
+def _build_people_search_urls(name: str, city: str, state: str = "") -> list[str]:
     """Build direct URLs for free people search sites that show addresses.
 
     CyberBackgroundChecks is the only reliable free site — Firecrawl
@@ -868,16 +901,21 @@ def _build_people_search_urls(name: str, city: str) -> list[str]:
     first = parts[0].lower()
     last = parts[-1].lower()
     city_clean = (city or "").strip().lower().replace(" ", "-")
+    state_slug = (state or "").strip().lower()
+    if not state_slug:
+        # No state hint — return name-only path; CyberBackgroundChecks resolves
+        # nationally and falls back to multi-state results.
+        return [f"https://www.cyberbackgroundchecks.com/people/{first}-{last}"]
 
     urls = [
         # CyberBackgroundChecks — shows full address history, phones, relatives
         f"https://www.cyberbackgroundchecks.com/people/"
-        f"{first}-{last}/{city_clean}-tn",
+        f"{first}-{last}/{city_clean}-{state_slug}",
     ]
     return urls
 
 
-def _search_serper(name: str, city: str) -> list[str]:
+def _search_serper(name: str, city: str, state: str = "") -> list[str]:
     """Search Google via Serper.dev for people search site URLs.
 
     Returns a list of URLs from known people search domains.
@@ -897,7 +935,12 @@ def _search_serper(name: str, city: str) -> list[str]:
     # CyberBackgroundChecks is the only free site Firecrawl can scrape reliably.
     # TruePeopleSearch times out, FastPeopleSearch is Cloudflare-blocked.
     city_clean = (city or "").strip()
-    query = f'"{first} {last}" {city_clean} TN site:cyberbackgroundchecks.com'
+    state_qualifier = (state or "").strip().upper()
+    query = (
+        f'"{first} {last}" {city_clean} {state_qualifier} site:cyberbackgroundchecks.com'
+        if state_qualifier
+        else f'"{first} {last}" {city_clean} site:cyberbackgroundchecks.com'
+    )
 
     try:
         resp = requests.post(
@@ -1024,12 +1067,15 @@ def _fetch_firecrawl(
 
 
 def _extract_address_from_page(
-    page_text: str, name: str, city: str, api_key: str
+    page_text: str, name: str, city: str, api_key: str, state: str = ""
 ) -> dict | None:
     """Use Claude Haiku to extract a mailing address from page text."""
+    state_code = (state or "").strip().upper()
     prompt = ADDRESS_EXTRACT_PROMPT.format(
         name=name,
         city=city or "",
+        state=_state_name(state_code) or "unknown",
+        state_code=state_code or "—",
         page_text=page_text[:MAX_ADDRESS_TEXT],
     )
     try:
@@ -1042,7 +1088,7 @@ def _extract_address_from_page(
             return {
                 "street": street,
                 "city": parsed.get("city", ""),
-                "state": parsed.get("state", "TN"),
+                "state": parsed.get("state", state_code),
                 "zip": parsed.get("zip", ""),
             }
     except Exception as e:
@@ -1051,7 +1097,7 @@ def _extract_address_from_page(
 
 
 def _lookup_dm_address_serper_firecrawl(
-    name: str, city: str, api_key: str
+    name: str, city: str, api_key: str, state: str = ""
 ) -> dict | None:
     """Look up DM address via direct people search URLs + Firecrawl rendering.
 
@@ -1061,7 +1107,7 @@ def _lookup_dm_address_serper_firecrawl(
     the address from rendered page content.
     """
     # Phase 1: Direct people search URLs (no Google search needed)
-    direct_urls = _build_people_search_urls(name, city)
+    direct_urls = _build_people_search_urls(name, city, state=state)
     for url in direct_urls:
         page_text = _fetch_firecrawl(url, max_text=MAX_ADDRESS_TEXT, priority="low")
         if not page_text or len(page_text) < 100:
@@ -1069,14 +1115,14 @@ def _lookup_dm_address_serper_firecrawl(
         if not page_text or len(page_text) < 100:
             continue
 
-        result = _extract_address_from_page(page_text, name, city, api_key)
+        result = _extract_address_from_page(page_text, name, city, api_key, state=state)
         if result:
             logger.debug("Direct URL hit for %s: %s", name, url)
             return result
         time.sleep(random.uniform(0.5, 1.0))
 
     # Phase 2: Serper Google search fallback
-    serper_urls = _search_serper(name, city)
+    serper_urls = _search_serper(name, city, state=state)
     for url in serper_urls:
         # Skip URLs we already tried via direct
         if any(url.startswith(d.rsplit("/", 1)[0]) for d in direct_urls):
@@ -1088,7 +1134,7 @@ def _lookup_dm_address_serper_firecrawl(
         if not page_text or len(page_text) < 100:
             continue
 
-        result = _extract_address_from_page(page_text, name, city, api_key)
+        result = _extract_address_from_page(page_text, name, city, api_key, state=state)
         if result:
             logger.debug("Serper URL hit for %s: %s", name, url)
             return result
@@ -1098,7 +1144,8 @@ def _lookup_dm_address_serper_firecrawl(
 
 
 def _lookup_dm_address_tracerfy(name: str, city: str,
-                                 address: str = "", zip_code: str = "") -> dict | None:
+                                 address: str = "", zip_code: str = "",
+                                 state: str = "") -> dict | None:
     """Look up DM mailing address via Tracerfy Instant Trace API.
 
     Uses POST /v1/api/trace/lookup/ (synchronous, single-record).
@@ -1126,7 +1173,7 @@ def _lookup_dm_address_tracerfy(name: str, city: str,
             json={
                 "address": address or "",
                 "city": city or "",
-                "state": "TN",
+                "state": (state or "").strip().upper(),
                 "zip": zip_code or "",
                 "find_owner": False,
                 "first_name": first_name,
@@ -1157,7 +1204,7 @@ def _lookup_dm_address_tracerfy(name: str, city: str,
             return {
                 "street": street,
                 "city": (mail.get("city") or "").strip(),
-                "state": (mail.get("state") or "TN").strip(),
+                "state": (mail.get("state") or (state or "").strip().upper()).strip(),
                 "zip": (mail.get("zip") or "").strip(),
             }
         return None
@@ -1196,7 +1243,8 @@ def _batch_tracerfy_lookup(notices: list) -> None:
         addr = n.address.strip()
         city_hint = n.city.strip() or ""
         zip_code = n.zip.strip()
-        writer.writerow([first_name, last_name, addr, city_hint, "TN",
+        writer.writerow([first_name, last_name, addr, city_hint,
+                         (n.state or "").strip().upper(),
                          zip_code, "", "", ""])
         lookup_map.append((n, first_name, last_name))
 
@@ -1278,7 +1326,7 @@ def _batch_tracerfy_lookup(notices: list) -> None:
                             and not notice.decision_maker_street):
                         notice.decision_maker_street = street
                         notice.decision_maker_city = (rec.get("mail_city") or "").strip()
-                        notice.decision_maker_state = (rec.get("mail_state") or "TN").strip()
+                        notice.decision_maker_state = (rec.get("mail_state") or (notice.state or "").strip().upper()).strip()
                         notice.decision_maker_zip = (rec.get("mail_zip") or "").strip()
                         matched += 1
                         logger.info(
@@ -1297,6 +1345,7 @@ def _batch_tracerfy_lookup(notices: list) -> None:
 
 def _lookup_dm_address(
     name: str, city: str, api_key: str, tracerfy_tier1: bool = False,
+    state: str = "",
 ) -> dict:
     """Look up decision-maker's mailing address using tiered sources.
 
@@ -1317,7 +1366,7 @@ def _lookup_dm_address(
         import config as cfg
         if cfg.TRACERFY_API_KEY:
             tf_result = _lookup_dm_address_tracerfy(
-                name, city or "", address="", zip_code=""
+                name, city or "", address="", zip_code="", state=state,
             )
             if tf_result and tf_result.get("street"):
                 result.update(tf_result)
@@ -1334,7 +1383,7 @@ def _lookup_dm_address(
     # Tier 2: Direct people search URLs + Firecrawl + LLM
     import config as cfg
     sf_result = _lookup_dm_address_serper_firecrawl(
-        name, city, api_key
+        name, city, api_key, state=state,
     )
     if sf_result and sf_result.get("street"):
         result.update(sf_result)
@@ -1345,7 +1394,7 @@ def _lookup_dm_address(
 
     # Tier 2b: DuckDuckGo fallback (when Serper/Firecrawl not configured)
     if not cfg.SERPER_API_KEY and not cfg.FIRECRAWL_API_KEY:
-        web_result = _lookup_dm_address_web(name, city, api_key)
+        web_result = _lookup_dm_address_web(name, city, api_key, state=state)
         if web_result and web_result.get("street"):
             result.update(web_result)
             result["source"] = "ddg_people_search"
@@ -1441,8 +1490,13 @@ def _parse_obituary_with_llm(
     city: str,
     address: str,
     api_key: str,
+    state: str = "",
 ) -> dict | None:
     """Use Claude Haiku to validate and parse an obituary.
+
+    `state` should be the property's 2-letter state code (e.g. "VA", "MD").
+    It's rendered into the prompt so the LLM matches against the right
+    geography. Defaults to empty when unknown (prompt prints empty state).
 
     Returns parsed dict if the obituary matches the owner, None otherwise.
     """
@@ -1456,6 +1510,7 @@ def _parse_obituary_with_llm(
     prompt = OBITUARY_PROMPT.format(
         owner_name=owner_name,
         city=city or "unknown",
+        state=_state_name(state) or "unknown",
         address=address or "unknown",
         obituary_text=obituary_text[:MAX_OBITUARY_TEXT],
     )
@@ -1549,7 +1604,11 @@ def rank_decision_makers(
     Priority: executor > spouse > children > siblings > others.
     Within each group: verified_living first, then unverified, then deceased.
 
-    Signing authority is based on Tennessee intestate succession law:
+    Signing authority follows the common UPC-style intestate succession
+    pattern shared by VA, MD, and TN (the three states this codebase has
+    touched). State-specific quirks (e.g. dower rights, spousal elective
+    shares) are not modeled — that's the operator's attorney's job. The
+    rules below are generic enough to be safe for VA/MD/TN:
       - Executor/PR: always has signing authority
       - Spouse: always has signing authority
       - Children (NOT step-children): signing authority if alive
@@ -1723,6 +1782,7 @@ def verify_heir_status(
     api_key: str,
     depth: int = 0,
     max_depth: int = 2,
+    state: str = "",
 ) -> dict:
     """Search for an obituary for a single heir to verify alive/dead.
 
@@ -1740,7 +1800,7 @@ def verify_heir_status(
     }
 
     results = _search_obituary(heir_name, city)
-    result["search_log"]["query"] = f"{heir_name} obituary {city} Tennessee"
+    result["search_log"]["query"] = f"{heir_name} obituary {city}"
 
     if not results:
         # No search results at all — likely alive (no obituary exists online)
@@ -1760,6 +1820,7 @@ def verify_heir_status(
                 city=city,
                 address="",  # don't know heir's address
                 api_key=api_key,
+                state=state,
             )
             if parsed and parsed.get("confidence") in ("high", "medium"):
                 result["status"] = "deceased"
@@ -1787,6 +1848,7 @@ def verify_heir_status(
             city=city,
             address="",
             api_key=api_key,
+            state=state,
         )
         if parsed and parsed.get("confidence") == "high":
             result["status"] = "deceased"
@@ -1810,6 +1872,7 @@ def build_heir_map(
     api_key: str,
     raw_name: str = "",
     max_depth: int = 2,
+    state: str = "",
 ) -> tuple[list[dict], dict]:
     """Build heir map with verification, return (ranked_dms, error_info).
 
@@ -1873,7 +1936,7 @@ def build_heir_map(
         logger.info("    Verifying heir: %s", vname)
         return vname, verify_heir_status(
             heir_name=vname, city=city, api_key=api_key,
-            depth=0, max_depth=max_depth,
+            depth=0, max_depth=max_depth, state=state,
         )
 
     sub_heirs_to_check: list[tuple[str, list]] = []
@@ -1905,7 +1968,7 @@ def build_heir_map(
         logger.info("      Verifying sub-heir: %s", vname)
         return vname, _, verify_heir_status(
             heir_name=vname, city=city, api_key=api_key,
-            depth=1, max_depth=max_depth,
+            depth=1, max_depth=max_depth, state=state,
         )
 
     if sub_verify_tasks:
@@ -2269,6 +2332,7 @@ def enrich_obituary_data(
                     city=city,
                     address=notice.address,
                     api_key=api_key,
+                    state=notice.state,
                 )
 
                 if parsed and parsed.get("confidence") in ("high", "medium"):
@@ -2314,6 +2378,7 @@ def enrich_obituary_data(
                     city=city,
                     address=notice.address,
                     api_key=api_key,
+                    state=notice.state,
                 )
 
                 _conf = parsed.get("confidence", "") if parsed else ""
@@ -2424,7 +2489,8 @@ def enrich_obituary_data(
                         city = notice.city.strip() or ""
 
                         result = await ancestry_enricher.lookup_deceased(
-                            page, name=search_name, city=city, state="TN"
+                            page, name=search_name, city=city,
+                            state=(notice.state or "").strip().upper(),
                         )
                         if result and result.get("confirmed_deceased"):
                             notice.owner_deceased = "yes"
@@ -2468,6 +2534,7 @@ def enrich_obituary_data(
                                             city=city,
                                             address=notice.address,
                                             api_key=api_key,
+                                            state=notice.state,
                                         )
                                         if parsed and parsed.get("confidence") in ("high", "medium"):
                                             parsed["_raw_obituary_text"] = page_text
@@ -2561,6 +2628,7 @@ def enrich_obituary_data(
                     )
                     verification = verify_heir_status(
                         heir_name=co_owner_name, city=city, api_key=api_key,
+                        state=notice.state,
                     )
                     co_owner_status = verification["status"]
 
@@ -2603,7 +2671,7 @@ def enrich_obituary_data(
                 "rank": 1,
                 "street": notice.owner_street,
                 "city": notice.owner_city or "",
-                "state": "TN",
+                "state": (notice.owner_state or notice.state or "").strip().upper(),
                 "zip": notice.owner_zip,
             }]
             error_info = {
@@ -2635,6 +2703,7 @@ def enrich_obituary_data(
                 api_key=api_key,
                 raw_name=raw_name,
                 max_depth=max_heir_depth,
+                state=notice.state,
             )
             error_info["heir_search_depth"] = 1
             heir_verified_count += 1
@@ -2653,6 +2722,7 @@ def enrich_obituary_data(
                     original_url=url,
                     api_key=api_key,
                     address=notice.address,
+                    state=notice.state,
                 )
                 if new_parsed:
                     parsed = new_parsed
@@ -2667,6 +2737,7 @@ def enrich_obituary_data(
                             api_key=api_key,
                             raw_name=raw_name,
                             max_depth=max_heir_depth,
+                            state=notice.state,
                         )
                         error_info["heir_search_depth"] = 1
                         research_dm_count += 1
@@ -2688,6 +2759,7 @@ def enrich_obituary_data(
                     city=city,
                     address=notice.address,
                     api_key=api_key,
+                    state=notice.state,
                 )
                 if fc_parsed:
                     parsed = fc_parsed
@@ -2707,6 +2779,7 @@ def enrich_obituary_data(
                                 api_key=api_key,
                                 raw_name=raw_name,
                                 max_depth=max_heir_depth,
+                                state=notice.state,
                             )
                             error_info["heir_search_depth"] = 1
                             error_info["missing_flags"] = error_info.get("missing_flags", [])
@@ -2737,6 +2810,7 @@ def enrich_obituary_data(
                             api_key=api_key,
                             raw_name=raw_name,
                             max_depth=max_heir_depth,
+                            state=notice.state,
                         )
                         error_info["heir_search_depth"] = 1
                         error_info["missing_flags"] = error_info.get("missing_flags", [])
@@ -2761,6 +2835,7 @@ def enrich_obituary_data(
                         heir_name=spouse_name,
                         city=city,
                         api_key=api_key,
+                        state=notice.state,
                     )
                     spouse_status = verification["status"]
 
@@ -2813,6 +2888,7 @@ def enrich_obituary_data(
                             heir_name=co_owner,
                             city=city,
                             api_key=api_key,
+                            state=notice.state,
                         )
                         spouse_status = verification["status"]
                     ranked_dms = [{
@@ -2849,7 +2925,7 @@ def enrich_obituary_data(
                 "rank": 1,
                 "street": notice.address,
                 "city": notice.city or "",
-                "state": "TN",
+                "state": (notice.state or "").strip().upper(),
                 "zip": notice.zip,
             }]
             error_info = {
@@ -2900,7 +2976,8 @@ def enrich_obituary_data(
                     j, len(matches), dm_name, dm_city_hint or "unknown",
                 )
                 addr = _lookup_dm_address(dm_name, dm_city_hint, api_key,
-                                          tracerfy_tier1=tracerfy_tier1)
+                                          tracerfy_tier1=tracerfy_tier1,
+                                          state=notice.state)
                 if addr.get("street"):
                     dm.update(addr)
                     source = addr.get("source", "unknown")
@@ -2920,6 +2997,7 @@ def enrich_obituary_data(
                     tracerfy_result = _lookup_dm_address_tracerfy(
                         dm_name, dm_city_hint or city,
                         address=notice.address, zip_code=notice.zip,
+                        state=notice.state,
                     )
                     if tracerfy_result and tracerfy_result.get("street"):
                         dm.update(tracerfy_result)
@@ -2936,7 +3014,7 @@ def enrich_obituary_data(
                 if dm is ranked_dms[0] and dm.get("source") != "estate_fallback":
                     dm["street"] = notice.address
                     dm["city"] = notice.city or ""
-                    dm["state"] = "TN"
+                    dm["state"] = (notice.state or "").strip().upper()
                     dm["zip"] = notice.zip
                     dm_addr_sources["property_fallback"] = (
                         dm_addr_sources.get("property_fallback", 0) + 1
