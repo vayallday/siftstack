@@ -122,6 +122,63 @@ async def _load_cookies(context) -> bool:
 
 # ── Popup dismissal (REUSE datasift_core) ─────────────────────────────
 
+async def _capture_list_nav_diagnostic(page: Page, list_name: str, reason: str) -> None:
+    """Capture screenshot + DOM excerpt when list-nav click fails.
+
+    Saves to local FS AND uploads to Apify KVS (if running on Apify) so the
+    operator can retrieve them from the run's Storage tab after a failure.
+    """
+    from datetime import datetime as _dt
+    stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+    slug = "".join(c if c.isalnum() else "_" for c in list_name)[:40]
+    base = f"pr_listnav_{reason}_{slug}_{stamp}"
+    shot_path = config.OUTPUT_DIR / f"{base}.png"
+    dom_path = config.OUTPUT_DIR / f"{base}.html"
+    try:
+        config.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        await page.screenshot(path=str(shot_path), full_page=True)
+        logger.error("List-nav %s — screenshot: %s  url=%s", reason, shot_path, page.url)
+        try:
+            html = await page.content()
+            dom_path.write_text(html, encoding="utf-8", errors="replace")
+        except Exception:
+            html = ""
+        # Inventory the candidate list-name elements PR actually rendered.
+        try:
+            sample = await page.evaluate(
+                """() => {
+                    const out = [];
+                    document.querySelectorAll('[class*="list-name"], [data-qtip*="Auction"], [data-qtip*="Probate"]').forEach(el => {
+                        out.push({
+                            cls: el.className || '',
+                            qtip: el.getAttribute('data-qtip') || '',
+                            text: (el.innerText || '').slice(0, 80),
+                        });
+                    });
+                    return out.slice(0, 40);
+                }"""
+            )
+            logger.error("List-nav %s — candidate list elements (%d): %r",
+                         reason, len(sample), sample)
+        except Exception as _e:
+            logger.debug("Candidate enumeration failed: %s", _e)
+        # Push to Apify KVS so the screenshot survives container teardown.
+        if os.environ.get("APIFY_IS_AT_HOME") or os.environ.get("APIFY_TOKEN"):
+            try:
+                from apify import Actor
+                kvs = await Actor.open_key_value_store()
+                await kvs.set_value(base, shot_path.read_bytes(),
+                                    content_type="image/png")
+                if html:
+                    await kvs.set_value(f"{base}_html", html.encode("utf-8"),
+                                        content_type="text/html")
+                logger.error("List-nav %s — uploaded to KVS as key %r", reason, base)
+            except Exception as _e:
+                logger.debug("KVS upload of list-nav diagnostic failed: %s", _e)
+    except Exception as _e:
+        logger.debug("Could not capture list-nav diagnostic: %s", _e)
+
+
 async def _dismiss_pr_popups(page: Page) -> None:
     """Dismiss SaaS popups before any click interaction.
 
@@ -778,7 +835,11 @@ async def run_list(
     # store_stable returns 0 immediately if it polls before that fetch.
     await _dismiss_pr_popups(page)
     list_selector = SEL_PR_LIST_NAV.replace("{name}", pr_list.name)
-    await page.click(list_selector)
+    try:
+        await page.click(list_selector)
+    except Exception:
+        await _capture_list_nav_diagnostic(page, pr_list.name, "click_timeout")
+        raise
     # Wait for URL to commit, then a fixed settle window. We tried two
     # smarter alternatives (poll BufferedStore.loading; track grid_id
     # transitions) and both fired early — PR's app briefly re-mounts the

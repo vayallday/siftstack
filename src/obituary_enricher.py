@@ -2068,10 +2068,21 @@ def enrich_obituary_data(
     # Tuple: (notice, raw_name, is_tax_name)
     # is_tax_name=True → LAST FIRST MIDDLE format (use parse_tax_owner_name)
     # is_tax_name=False → FIRST LAST format from notice (use _parse_notice_owner_name)
+    # Obituary search is only meaningful for notice types where the owner may
+    # be deceased. Foreclosure, eviction, divorce, code_violation, and
+    # vacant_building all have living owners (the entire premise of the
+    # filing). Including them used to be harmless on TN, but on Apify with
+    # no proxy + Google/Brave/DDG rate-limiting, each record costs ~30s of
+    # 429s with zero yield — a 600-record foreclosure batch burned 5 hours
+    # in production with 0 matches. Restrict to types where deceased status
+    # is plausible.
+    DECEASED_PLAUSIBLE = {"probate", "pre_probate", "tax_sale", "tax_delinquent"}
     candidates = []
     for n in notices:
         # Skip records already enriched (e.g., from partial CSV re-import)
         if n.owner_deceased == "yes" and n.decision_maker_name:
+            continue
+        if n.notice_type and n.notice_type not in DECEASED_PLAUSIBLE:
             continue
         # Probate: search for decedent (the deceased), not executor/PR
         if n.notice_type == "probate" and n.decedent_name.strip():
