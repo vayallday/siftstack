@@ -2257,56 +2257,19 @@ def enrich_obituary_data(
                     logger.debug("  [%d/%d] %s: cache hit (no match)", i, len(candidates), search_name)
                 break
 
-            # Run primary + no-city searches and merge results (dedup by URL)
+            # Single primary search per name variant. The earlier multi-fallback
+            # loop (primary + no-city + middle-initial-drop + nickname variants
+            # + "death notice" variant) issued up to 5 query rounds × 3 search
+            # engines = 15+ requests per record. On Apify without a residential
+            # proxy, every query 429s within seconds, but each round still
+            # costs ~5-10s of wall time → 35+ sec per record total. Trimming
+            # to a single primary query cuts the per-record budget to ~5-10s
+            # and lets us drain the queue inside the Apify 3-hour timeout.
+            # Pre_probate yield on build 1.0.3 was 4.7% (7/150) with all
+            # fallbacks; expected post-trim hit rate is 3-4% but with 4-7x
+            # more records processed per run, total confirmed deaths goes UP.
             results = _search_obituary(search_name, city)
-            no_city_results = _search_obituary(search_name, "")
-            seen_urls = {r["url"] for r in results}
-            for r in no_city_results:
-                if r["url"] not in seen_urls:
-                    results.append(r)
-                    seen_urls.add(r["url"])
             searched += 1
-
-            if not results:
-                # Fallback 2: drop middle initial ("Daniel H Williams" → "Daniel Williams")
-                # Some sites only index first + last; middle initial reduces recall
-                parts = search_name.split()
-                if len(parts) == 3:
-                    name_no_mi = f"{parts[0]} {parts[2]}"
-                    results = _search_obituary(name_no_mi, city)
-                    if results:
-                        logger.debug(
-                            "  [%d/%d] %s: fallback query (no MI) found %d results",
-                            i, len(candidates), name_no_mi, len(results),
-                        )
-
-            if not results:
-                # Fallback 3: try nickname variants ("Robert" → "Bob", etc.)
-                parts = search_name.split()
-                first = parts[0] if parts else ""
-                last = parts[-1] if len(parts) >= 2 else ""
-                if first and last:
-                    for variant in _get_name_variants(first):
-                        nick_name = f"{variant} {last}".title()
-                        results = _search_obituary(nick_name, city)
-                        if results:
-                            logger.debug(
-                                "  [%d/%d] %s: nickname fallback (%s) found %d results",
-                                i, len(candidates), search_name, nick_name, len(results),
-                            )
-                            break
-
-            if not results:
-                # Fallback 4: "death notice" / funeral home query
-                results = _search_obituary(
-                    search_name, city,
-                    extra_terms='"death notice" OR "funeral"',
-                )
-                if results:
-                    logger.debug(
-                        "  [%d/%d] %s: death notice fallback found %d results",
-                        i, len(candidates), search_name, len(results),
-                    )
 
             if not results:
                 logger.debug("  [%d/%d] %s: no obituary results", i, len(candidates), search_name)
