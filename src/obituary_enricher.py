@@ -2203,7 +2203,32 @@ def enrich_obituary_data(
 
     probate_preset_count = 0
 
+    # Circuit breaker: abort Phase A if it exceeds OBIT_PHASE_BUDGET_SECS so the
+    # pipeline can still reach Phase B / Phase A.5 / DataSift upload inside the
+    # Apify 3-hour cap. Tunable via OBIT_PHASE_BUDGET_SECS env (default 90 min).
+    # Without this, a full obit timeout takes down DataSift upload too — losing
+    # every record from the entire run.
+    _phase_a_start = time.monotonic()
+    _phase_a_budget = float(os.environ.get("OBIT_PHASE_BUDGET_SECS", "5400"))
+    _phase_a_aborted = False
+
     for i, (notice, raw_name, is_tax_name) in enumerate(candidates, 1):
+        if not _phase_a_aborted:
+            _elapsed = time.monotonic() - _phase_a_start
+            if _elapsed > _phase_a_budget:
+                logger.warning(
+                    "Phase A circuit breaker fired at %d/%d after %.1f min "
+                    "(budget %.1f min) — skipping remaining %d candidates to "
+                    "preserve DataSift upload",
+                    i - 1, len(candidates), _elapsed / 60, _phase_a_budget / 60,
+                    len(candidates) - (i - 1),
+                )
+                _phase_a_aborted = True
+        if _phase_a_aborted:
+            # Drain the rest of the iterator without doing search work.
+            # We still need to count skipped so the run summary is accurate.
+            skipped += 1
+            continue
         # Probate executor pre-set: use named PR as DM when available.
         # Courthouse terminal records have PR name but no address — still use preset
         # to avoid overriding the court-named PR with a wrong obituary match.
