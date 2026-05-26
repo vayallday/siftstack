@@ -94,6 +94,20 @@ class AsyncExportUnsupportedError(Exception):
     """
 
 
+class InsufficientBalanceError(Exception):
+    """Raised when PR's "Complete Export" modal blocks the export because
+    the account balance is insufficient.
+
+    Verified 2026-05-26: after burning through what looked like a 10K/mo
+    free quota across several aborted/timed-out runs, PR's export wizard
+    started showing a "Available balance is insufficient" modal with the
+    current balance (e.g. $2.12) + an "Add to Balance" button. The modal
+    blocks ALL navigation — subsequent lists can't be reached until it's
+    dismissed. Wholesale-abort remaining lists so we don't burn Apify
+    minutes trying to navigate around a payment wall.
+    """
+
+
 # ── Cookie persistence (mirrors scraper.py L485-506; swaps file path) ─
 
 async def _save_cookies(context) -> None:
@@ -782,6 +796,24 @@ async def _export_delta(
     await page.click(SEL_PR_EXPORT_PURCHASE)
     await asyncio.sleep(3)
 
+    # ── Balance-insufficient detector (2026-05-26) ─────────────────────
+    # After Purchase, PR may show "Complete Export" with the text
+    # "Available balance is insufficient to complete this purchase" + the
+    # current $X.XX balance + an "Add to Balance" CTA. The modal blocks ALL
+    # navigation — if we leave it open, the next list-nav click times out.
+    # Fail fast so the caller skips remaining lists wholesale.
+    try:
+        body_text = (await page.locator("body").inner_text(timeout=2000)) or ""
+    except Exception:
+        body_text = ""
+    if "Available balance is insufficient" in body_text:
+        await _capture_list_nav_diagnostic(page, pr_list.name, "insufficient_balance")
+        raise InsufficientBalanceError(
+            f"PR export of '{pr_list.name}' blocked by insufficient-balance modal. "
+            "Top up at app.propertyradar.com/#!/account or wait for the monthly "
+            "free tier to reset on the 1st."
+        )
+
     # In the modal: pick the CSV format radio (label-click — the native
     # radio is visually hidden), then click Download via _download_export.
     await page.locator(SEL_PR_DOWNLOAD_MODAL).locator(
@@ -1043,13 +1075,15 @@ async def pull_all_lists(
                     page, pr_list, previous_registry, download_dir, today=today_iso,
                 )
                 all_notices.extend(list_notices)
-            except (QuotaGuardError, QuotaExceededError) as exc:
-                # Wholesale-abort on either guard:
-                #   QuotaGuardError    = per-run sanity (stale state file)
-                #   QuotaExceededError = cumulative-month budget hit (PR-09)
-                # Both signal "stop spending quota on this run" — continuing
-                # to the next list would only consume more.
-                logger.error("Quota guard fired (%s) — aborting all remaining lists: %s",
+            except (QuotaGuardError, QuotaExceededError, InsufficientBalanceError) as exc:
+                # Wholesale-abort on any of these:
+                #   QuotaGuardError         = per-run sanity (stale state file)
+                #   QuotaExceededError      = cumulative-month budget hit (PR-09)
+                #   InsufficientBalanceError = PR's "Add to Balance" modal
+                # All three signal "stop spending quota on this run" —
+                # continuing only burns Apify minutes while the puller's stuck
+                # behind a blocking modal.
+                logger.error("Quota/balance guard fired (%s) — aborting all remaining lists: %s",
                              type(exc).__name__, exc)
                 quota_disaster = True
                 break

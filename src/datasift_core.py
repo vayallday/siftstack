@@ -178,26 +178,89 @@ async def login(page, email: str = None, password: str = None) -> bool:
     # didn't happen to contain "/login" at that exact moment (transient
     # state during a slow redirect, for example), it would fall through to
     # save_cookies + return True. That masked a credential-misconfig bug on
-    # 2026-05-23 — the .env had a placeholder DATASIFT_EMAIL, login never
-    # actually completed, but the function reported success and the failure
-    # surfaced much later as "Could not find Upload File button". Be strict:
-    # if we don't land on /dashboard within the timeout, login failed.
-    try:
-        await page.wait_for_url("**/dashboard/general**", timeout=15000)
-    except PwTimeout:
+    # 2026-05-23.
+    #
+    # 2026-05-26: an Apify run logged "Final URL: https://app.reisift.io/"
+    # (bare root, NOT /login) → click DID navigate but didn't reach
+    # /dashboard/general. DataSift has multiple post-login landing routes
+    # (/, /dashboard, /dashboard/general, /records/*) depending on account
+    # state + role + recent activity. Match any of them — re-validate by
+    # negative gate (still seeing the password input means not logged in).
+    POST_LOGIN_PATTERNS = (
+        "**/dashboard/general**",
+        "**/dashboard**",
+        "**/records/**",
+        "**/siftmap**",
+        # The bare root is a valid landing for some accounts post-login —
+        # confirm by negative gate (password input absent) before trusting it.
+        "https://app.reisift.io/",
+    )
+
+    async def _await_post_login() -> str | None:
+        # Returns the URL we landed on, or None if all patterns timed out.
+        for pat in POST_LOGIN_PATTERNS:
+            try:
+                await page.wait_for_url(pat, timeout=5000)
+                return page.url
+            except PwTimeout:
+                continue
+        return None
+
+    landed_url = await _await_post_login()
+    if landed_url is None:
         logger.error(
-            "DataSift login failed — did not reach /dashboard/general within "
-            "15s. Final URL: %s. Check credentials in .env (DATASIFT_EMAIL / "
+            "DataSift login failed — no post-login URL matched within 25s. "
+            "Final URL: %s. Check credentials in .env (DATASIFT_EMAIL / "
             "DATASIFT_PASSWORD) and the Sign In button state (disabled means "
             "the form's email / password / terms checkbox didn't latch).",
             page.url,
         )
         await screenshot(page, "login_failed_post_signin")
+        await _upload_login_diagnostic(page, "no_post_login_url")
         return False
 
+    # Negative gate — if the password field is still visible, we're still on
+    # the form (Sign In was a no-op or session got rejected).
+    try:
+        pw_visible = await page.locator('input[type="password"]').first.is_visible(timeout=1000)
+    except Exception:
+        pw_visible = False
+    if pw_visible:
+        logger.error(
+            "DataSift login failed — landed on %s but password field is still "
+            "visible. Likely a credential or terms-checkbox issue.",
+            landed_url,
+        )
+        await screenshot(page, "login_failed_pw_still_visible")
+        await _upload_login_diagnostic(page, "pw_still_visible")
+        return False
+
+    logger.info("DataSift login successful — landed on %s", landed_url)
     await save_cookies(page)
-    logger.info("DataSift login successful")
     return True
+
+
+async def _upload_login_diagnostic(page, tag: str) -> None:
+    """When running on Apify, push the login-failure screenshot + HTML to KVS
+    so we can debug post-mortem (the local screenshot file is ephemeral on
+    the Actor container)."""
+    import os as _os
+    if not (_os.environ.get("APIFY_IS_AT_HOME") or _os.environ.get("APIFY_TOKEN")):
+        return
+    from datetime import datetime as _dt
+    stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+    key_base = f"datasift_login_{tag}_{stamp}"
+    try:
+        png_bytes = await page.screenshot(full_page=True)
+        html = await page.content()
+        from apify import Actor
+        kvs = await Actor.open_key_value_store()
+        await kvs.set_value(key_base, png_bytes, content_type="image/png")
+        await kvs.set_value(f"{key_base}_html", html.encode("utf-8"),
+                            content_type="text/html")
+        logger.error("DataSift login diagnostic uploaded to KVS: %s + _html", key_base)
+    except Exception as e:
+        logger.debug("Failed to upload login diagnostic: %s", e)
 
 
 # ── UI Primitives ─────────────────────────────────────────────────────
