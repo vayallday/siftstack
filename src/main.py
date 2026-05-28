@@ -38,7 +38,10 @@ def _preflight_check(mode: str) -> list[str]:
 
     # ── Credential checks (mode-dependent) ──────────────────────────
     scrape_modes = {"daily", "historical"}
-    enrichment_modes = scrape_modes | {"pdf-import", "photo-import", "dropbox-watch", "csv-import"}
+    enrichment_modes = scrape_modes | {
+        "pdf-import", "photo-import", "dropbox-watch", "csv-import",
+        "richmond-vacant", "chesterfield-code-violation",
+    }
     datasift_modes = {"manage-presets", "manage-sold", "phone-validate"}
 
     if mode in scrape_modes:
@@ -76,6 +79,200 @@ def _preflight_check(mode: str) -> list[str]:
 
 
 # ── Apify Actor mode ─────────────────────────────────────────────────
+
+
+async def _apify_run_simple_feed_mode(actor_input: dict, mode: str, pipeline_start: float) -> None:
+    """Apify Actor flow for the bulk-feed modes (richmond-vacant, chesterfield-code-violation).
+
+    These modes are simpler than the PR daily/historical flow — no Tracerfy,
+    no DP PDF generation, no PR quota tracking. Just acquire → enrich → CSV
+    → KVS + optional Drive + DataSift + Slack. State files round-trip
+    through the Apify KVS so deltas work across runs.
+    """
+    from apify import Actor
+    from time import time as _time
+    import apify_state
+
+    kvs = await Actor.open_key_value_store()
+
+    # Per-mode wiring
+    if mode == "chesterfield-code-violation":
+        from chesterfield_aca_puller import (
+            CHESTERFIELD_ACA_STATE_FILE,
+            pull_new_records as _pull_aca,
+        )
+        from datetime import datetime as _dt
+        state_filename = CHESTERFIELD_ACA_STATE_FILE.name
+        source_label = "Chesterfield ACA Code Violation report"
+        csv_prefix = "chesterfield_code_violation"
+
+        await apify_state.restore_state_file(kvs, state_filename)
+
+        # Optional date-window override from actor input
+        aca_start_str = actor_input.get("aca_start") or ""
+        aca_end_str = actor_input.get("aca_end") or ""
+        aca_first_pull_days = int(actor_input.get("aca_first_pull_days") or 90)
+
+        start_d = _dt.strptime(aca_start_str, "%Y-%m-%d").date() if aca_start_str else None
+        end_d = _dt.strptime(aca_end_str, "%Y-%m-%d").date() if aca_end_str else None
+
+        aca_all_violations = bool(actor_input.get("aca_all_violations", False))
+
+        Actor.log.info("Pulling Chesterfield ACA Code Violation report")
+        # Runs Playwright; can't be wrapped in asyncio.to_thread cleanly because
+        # the puller spins up its own asyncio loop via asyncio.run().
+        # Run in a worker thread so we don't conflict with Actor's outer loop.
+        import asyncio as _asyncio
+        notices = await _asyncio.to_thread(
+            _pull_aca,
+            start_date=start_d,
+            end_date=end_d,
+            first_pull_days=aca_first_pull_days,
+            headless=True,
+            all_violations=aca_all_violations,
+        )
+    elif mode == "richmond-vacant":
+        from richmond_vacant_puller import (
+            RICHMOND_VACANT_STATE_FILE,
+            pull_new_records as _pull_vacant,
+        )
+        state_filename = RICHMOND_VACANT_STATE_FILE.name
+        source_label = "Richmond Vacant Building List"
+        csv_prefix = "richmond_vacant"
+
+        await apify_state.restore_state_file(kvs, state_filename)
+
+        Actor.log.info("Pulling Richmond Vacant Building List")
+        notices = _pull_vacant()
+    else:
+        Actor.log.error("Unknown feed mode: %s", mode)
+        await Actor.fail(status_message=f"Unknown feed mode: {mode}")
+        return
+
+    if not notices:
+        Actor.log.info("No new records — exiting cleanly")
+        # Even on zero-result runs, persist state in case the puller updated
+        # its last_fetched_at / hash markers.
+        await apify_state.persist_state_file(kvs, state_filename)
+        return
+
+    Actor.log.info("%s: %d new records", source_label, len(notices))
+
+    # ── Enrichment ───────────────────────────────────────────────────
+    from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline
+
+    include_vacant = bool(actor_input.get("include_vacant", False))
+    include_commercial = bool(actor_input.get("include_commercial", False))
+    include_entities = bool(actor_input.get("include_entities", False))
+
+    opts = PipelineOptions(
+        skip_parcel_lookup=True,
+        # Vacant Building List is by definition vacant — never filter it out.
+        # ACA records can include vacant land too; let operator decide.
+        skip_vacant_filter=True if mode == "richmond-vacant" else include_vacant,
+        skip_commercial_filter=include_commercial,
+        skip_entity_filter=include_entities,
+        # OPP is Richmond-only — skip on Chesterfield-only batches to avoid log noise.
+        skip_opp=(mode == "chesterfield-code-violation"),
+        source_label=f"Apify Actor ({source_label})",
+    )
+    notices = run_enrichment_pipeline(notices, opts)
+    if not notices:
+        Actor.log.warning("No records remaining after enrichment")
+        await apify_state.persist_state_file(kvs, state_filename)
+        return
+
+    total = len(notices)
+
+    # ── CSV → KVS ────────────────────────────────────────────────────
+    from datetime import datetime as _dt2
+    ts = _dt2.now().strftime("%Y-%m-%d_%H%M%S")
+    filename = f"{csv_prefix}_{ts}.csv"
+    csv_path = write_csv(notices, filename=filename)
+    with open(csv_path, "rb") as f:
+        await kvs.set_value("output.csv", f.read(), content_type="text/csv")
+    Actor.log.info("CSV saved to KVS as 'output.csv'")
+
+    # ── Push records to Apify Dataset ────────────────────────────────
+    for n in notices:
+        await Actor.push_data(n.__dict__)
+
+    # ── Optional Google Drive upload ─────────────────────────────────
+    drive_folder_id = actor_input.get("google_drive_folder_id", "")
+    drive_key_b64 = actor_input.get("google_service_account_key", "")
+    if drive_folder_id and drive_key_b64:
+        try:
+            from drive_uploader import upload_csv
+            file_id = upload_csv(csv_path, drive_folder_id, drive_key_b64, total)
+            Actor.log.info("CSV uploaded to Drive (file ID: %s)", file_id)
+        except Exception as e:
+            Actor.log.warning("Drive upload failed: %s — continuing", e)
+
+    # ── Optional DataSift automated upload + KVS audit copy ──────────
+    do_upload = bool(actor_input.get("upload_datasift", True))
+    do_enrich_ds = bool(actor_input.get("enrich_datasift", True))
+    do_skip_trace_ds = bool(actor_input.get("skip_trace_datasift", True))
+    datasift_csv_urls: list[dict] = []
+
+    from datasift_formatter import write_datasift_split_csvs
+    try:
+        csv_infos = write_datasift_split_csvs(notices)
+    except Exception as e:
+        Actor.log.error("DataSift CSV generation failed: %s", e)
+        csv_infos = []
+
+    if csv_infos and do_upload and config.DATASIFT_EMAIL and config.DATASIFT_PASSWORD:
+        Actor.log.info("DataSift automated upload — %d CSV(s)", len(csv_infos))
+        try:
+            from datasift_uploader import upload_datasift_split
+            result = await upload_datasift_split(
+                csv_infos,
+                headless=True,
+                enrich=do_enrich_ds,
+                skip_trace=do_skip_trace_ds,
+            )
+            if result.get("success"):
+                Actor.log.info("DataSift upload OK: %s", result.get("message", ""))
+            else:
+                Actor.log.warning("DataSift upload failed: %s", result.get("message"))
+        except Exception as e:
+            Actor.log.warning("DataSift upload raised: %s — KVS audit copy below", e)
+
+    # Audit copy: always save DataSift CSV(s) to KVS regardless of upload outcome
+    if csv_infos:
+        try:
+            kvs_id = kvs._id if hasattr(kvs, "_id") else ""
+            for info in csv_infos:
+                key = f"datasift_{info['label'].lower().replace(' ', '_')}.csv"
+                with open(info["path"], "rb") as f:
+                    await kvs.set_value(key, f.read(), content_type="text/csv")
+                url = f"https://api.apify.com/v2/key-value-stores/{kvs_id}/records/{key}"
+                datasift_csv_urls.append({
+                    "label": info["label"], "url": url,
+                    "records": info.get("count", "?"),
+                })
+                Actor.log.info("DataSift CSV (%s) saved to KVS", info["label"])
+        except Exception as e:
+            Actor.log.error("KVS audit-copy save failed: %s", e)
+
+    # ── Optional Slack notification ──────────────────────────────────
+    elapsed_min = (_time() - pipeline_start) / 60
+    do_notify_slack = bool(actor_input.get("notify_slack", True))
+    if do_notify_slack and config.SLACK_WEBHOOK_URL:
+        try:
+            from slack_notifier import send_slack_notification, _send_webhook
+            send_slack_notification(notices, elapsed_min=elapsed_min)
+            if datasift_csv_urls:
+                lines = [f"*DataSift CSV ({source_label}):*"]
+                for ci in datasift_csv_urls:
+                    lines.append(f"  <{ci['url']}|{ci['label']}> ({ci['records']} records)")
+                _send_webhook("\n".join(lines))
+        except Exception as e:
+            Actor.log.warning("Slack notification failed: %s", e)
+
+    # ── Persist state to KVS for next run ────────────────────────────
+    await apify_state.persist_state_file(kvs, state_filename)
+    Actor.log.info("Done — %d records exported (%.1f min)", total, elapsed_min)
 
 
 async def actor_main() -> None:
@@ -119,6 +316,20 @@ async def actor_main() -> None:
             if val:
                 os.environ[key] = val
 
+        # One-line credential-shape diagnostic. We've had two losing days on
+        # DataSift login because the Actor input's `datasift_password` field
+        # is stored as a 401-char ENCR... blob in the schedule body, and it's
+        # not 100% clear whether Apify auto-decrypts before passing to the
+        # Actor or whether we're sending the encrypted blob as the password.
+        # Logging LENGTHS only (never values) lets us diagnose without
+        # leaking secrets. Plaintext password is 13 chars; encrypted is 401.
+        for _k in ("DATASIFT_PASSWORD", "PROPERTYRADAR_PASSWORD"):
+            _v = _cred_map.get(_k, "")
+            Actor.log.info(
+                "Credential shape: %s length=%d prefix=%r",
+                _k, len(_v), _v[:4] if _v else "",
+            )
+
         mode = actor_input.get("mode", "daily")
         drive_folder_id = actor_input.get("google_drive_folder_id", "")
         drive_key_b64 = actor_input.get("google_service_account_key", "")
@@ -132,7 +343,14 @@ async def actor_main() -> None:
         include_commercial = actor_input.get("include_commercial", False)
         include_entities = actor_input.get("include_entities", False)
 
-        # Validate PropertyRadar credentials (the sole daily/historical source).
+        # ── Dispatch new bulk-feed modes (chesterfield, vacant) ─────────
+        # These modes don't need PropertyRadar creds and have a much simpler
+        # flow than daily/historical. Handled separately, then return.
+        if mode in ("chesterfield-code-violation", "richmond-vacant"):
+            await _apify_run_simple_feed_mode(actor_input, mode, pipeline_start)
+            return
+
+        # Validate PropertyRadar credentials (required for daily/historical).
         from propertyradar_config import (
             PROPERTYRADAR_EMAIL as _PR_EMAIL,
             PROPERTYRADAR_PASSWORD as _PR_PASS,
@@ -313,6 +531,28 @@ async def actor_main() -> None:
                 Actor.log.error("DataSift CSV generation failed: %s — skipping DataSift step entirely", e)
                 csv_infos = []
 
+            # KVS audit copy — save the DataSift CSVs to the run's key-value
+            # store BEFORE attempting the live upload. Reason: a previous run
+            # (svw6EmItcaQfqoEhJ, 2026-05-26) OOM'd when Playwright launched
+            # for the DataSift upload, and the CSV-fallback that used to run
+            # after the upload attempt never fired — losing the entire
+            # pull's record-of-truth. Doing the save first means the
+            # operator can always recover manually, regardless of what
+            # happens in the live-upload step.
+            if csv_infos:
+                try:
+                    kvs = await Actor.open_key_value_store()
+                    kvs_id = kvs._id if hasattr(kvs, '_id') else ''
+                    for info in csv_infos:
+                        key = f"datasift_{info['label'].lower().replace(' ', '_')}.csv"
+                        with open(info["path"], "rb") as f:
+                            await kvs.set_value(key, f.read(), content_type="text/csv")
+                        url = f"https://api.apify.com/v2/key-value-stores/{kvs_id}/records/{key}"
+                        datasift_csv_urls.append({"label": info["label"], "url": url, "records": info.get("count", "?")})
+                        Actor.log.info("DataSift CSV (%s) saved to KVS pre-upload: %s", info["label"], key)
+                except Exception as e:
+                    Actor.log.error("KVS pre-upload save failed: %s", e)
+
             # Primary path: automated headless upload (only if credentials present + toggled on)
             if csv_infos and do_upload and config.DATASIFT_EMAIL and config.DATASIFT_PASSWORD:
                 Actor.log.info(
@@ -345,22 +585,8 @@ async def actor_main() -> None:
                     "DataSift automated upload skipped — DATASIFT_EMAIL or DATASIFT_PASSWORD not set",
                 )
 
-            # Audit copy + manual-recovery fallback: always save CSVs to KVS
-            # (regardless of upload outcome) so the operator has a record-of-truth
-            # for what was attempted and can re-upload manually if needed.
-            if csv_infos:
-                try:
-                    kvs = await Actor.open_key_value_store()
-                    kvs_id = kvs._id if hasattr(kvs, '_id') else ''
-                    for info in csv_infos:
-                        key = f"datasift_{info['label'].lower().replace(' ', '_')}.csv"
-                        with open(info["path"], "rb") as f:
-                            await kvs.set_value(key, f.read(), content_type="text/csv")
-                        url = f"https://api.apify.com/v2/key-value-stores/{kvs_id}/records/{key}"
-                        datasift_csv_urls.append({"label": info["label"], "url": url, "records": info.get("count", "?")})
-                        Actor.log.info("DataSift CSV (%s) saved to KVS: %s", info["label"], key)
-                except Exception as e:
-                    Actor.log.error("KVS audit-copy save failed: %s", e)
+            # (KVS audit copy moved to pre-upload position above so it
+            # survives an OOM during the live upload step.)
 
             # ── Slack Notification ────────────────────────────────────
             elapsed_min = (_time() - pipeline_start) / 60
@@ -539,6 +765,125 @@ def _run_pdf_import(args) -> None:
     # Write output
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     filename = f"{county.lower()}_tax_sale_{timestamp}.csv"
+    path = write_csv(notices, filename=filename)
+    logging.info("Output: %s", path)
+    logging.info("Done — %d records exported", len(notices))
+
+
+def _run_chesterfield_aca(args) -> None:
+    """Pull Chesterfield ACA Code Violation report → diff vs state → enrich → CSV.
+
+    Bulk feed (anonymous, public). See memory: chesterfield-aca-code-violation-report.
+    """
+    from datetime import date, datetime
+    from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline
+    from chesterfield_aca_puller import pull_new_records
+
+    start = None
+    end = None
+    if getattr(args, "aca_start", None):
+        start = datetime.strptime(args.aca_start, "%Y-%m-%d").date()
+    if getattr(args, "aca_end", None):
+        end = datetime.strptime(args.aca_end, "%Y-%m-%d").date()
+    first_pull_days = getattr(args, "aca_first_pull_days", 90)
+    headless = not getattr(args, "aca_headed", False)
+
+    all_violations = bool(getattr(args, "aca_all_violations", False))
+
+    logger.info("Pulling Chesterfield ACA Code Violation report")
+    notices = pull_new_records(
+        start_date=start,
+        end_date=end,
+        first_pull_days=first_pull_days,
+        headless=headless,
+        all_violations=all_violations,
+    )
+
+    if not notices:
+        logging.info("No new Chesterfield ACA records — exiting")
+        return
+
+    logging.info("Chesterfield ACA delta: %d new records", len(notices))
+
+    opts = PipelineOptions(
+        skip_parcel_lookup=True,        # XLSX has no parcel — Smarty/assessor enrichment handles it
+        skip_smarty=getattr(args, "skip_smarty", False),
+        skip_zillow=getattr(args, "skip_zillow", False),
+        skip_tax=getattr(args, "skip_tax", False),
+        skip_geocode=getattr(args, "skip_geocode", False),
+        skip_obituary=getattr(args, "skip_obituary", False),
+        skip_ancestry=getattr(args, "skip_ancestry", False),
+        skip_entity_research=not getattr(args, "research_entities", False),
+        skip_vacant_filter=getattr(args, "include_vacant", False),
+        skip_commercial_filter=getattr(args, "include_commercial", False),
+        skip_entity_filter=getattr(args, "include_entities", False),
+        skip_heir_verification=getattr(args, "skip_heir_verification", False),
+        max_heir_depth=getattr(args, "max_heir_depth", 1),
+        skip_dm_address=getattr(args, "skip_dm_address", False),
+        tracerfy_tier1=getattr(args, "tracerfy_tier1", False),
+        # OPP is Richmond-only; the enricher self-filters but skip explicitly
+        # to avoid log noise on a Chesterfield-only batch.
+        skip_opp=True,
+        source_label="Chesterfield ACA Code Violation report",
+    )
+    notices = run_enrichment_pipeline(notices, opts)
+
+    if not notices:
+        logging.warning("No records remaining after pipeline")
+        return
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    filename = f"chesterfield_code_violation_{timestamp}.csv"
+    path = write_csv(notices, filename=filename)
+    logging.info("Output: %s", path)
+    logging.info("Done — %d records exported", len(notices))
+
+
+def _run_richmond_vacant(args) -> None:
+    """Pull Richmond Vacant Building List → diff vs state → enrich → CSV.
+
+    Vacancy registry feed (notice_type='vacant_building'). NOT a code
+    violation source — for Richmond code violations see the OPP enricher
+    (src/richmond_opp_enricher.py). See memory: richmond-code-violations.
+    """
+    from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline
+    from richmond_vacant_puller import pull_new_records
+
+    logger.info("Pulling Richmond Vacant Building List")
+    notices = pull_new_records()
+
+    if not notices:
+        logging.info("No new Vacant Building List records — exiting")
+        return
+
+    logging.info("Vacant Building List delta: %d new records", len(notices))
+
+    opts = PipelineOptions(
+        skip_parcel_lookup=True,
+        skip_smarty=getattr(args, "skip_smarty", False),
+        skip_zillow=getattr(args, "skip_zillow", False),
+        skip_tax=getattr(args, "skip_tax", False),
+        skip_geocode=getattr(args, "skip_geocode", False),
+        skip_obituary=getattr(args, "skip_obituary", False),
+        skip_ancestry=getattr(args, "skip_ancestry", False),
+        skip_entity_research=not getattr(args, "research_entities", False),
+        skip_vacant_filter=True,    # vacant is the WHOLE POINT of this feed
+        skip_commercial_filter=getattr(args, "include_commercial", False),
+        skip_entity_filter=getattr(args, "include_entities", False),
+        skip_heir_verification=getattr(args, "skip_heir_verification", False),
+        max_heir_depth=getattr(args, "max_heir_depth", 1),
+        skip_dm_address=getattr(args, "skip_dm_address", False),
+        tracerfy_tier1=getattr(args, "tracerfy_tier1", False),
+        source_label="Richmond Vacant Building List",
+    )
+    notices = run_enrichment_pipeline(notices, opts)
+
+    if not notices:
+        logging.warning("No Vacant Building List records remaining after pipeline")
+        return
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    filename = f"richmond_vacant_{timestamp}.csv"
     path = write_csv(notices, filename=filename)
     logging.info("Output: %s", path)
     logging.info("Done — %d records exported", len(notices))
@@ -901,6 +1246,7 @@ def cli_main() -> None:
         choices=[
             "daily", "historical", "pdf-import", "photo-import", "dropbox-watch",
             "csv-import", "phone-validate", "manage-sold", "manage-presets",
+            "richmond-vacant", "chesterfield-code-violation",
             # New analysis & workflow modes
             "comp", "rehab", "analyze-deal", "market-analysis", "buyer-prospect",
             "deep-prospect", "lead-manage", "setup-sequences", "niche-sequential",
@@ -910,6 +1256,8 @@ def cli_main() -> None:
             "daily/historical = scrape notices; pdf-import/photo-import = import from files; "
             "dropbox-watch = poll Dropbox; csv-import = re-enrich CSV; "
             "phone-validate = Trestle scoring; manage-sold/manage-presets = DataSift ops; "
+            "richmond-vacant = pull Richmond Vacant Building List side feed; "
+            "chesterfield-code-violation = pull Chesterfield ACA bulk code violation report; "
             "comp = comparable sales ARV; rehab = rehab cost estimate; "
             "analyze-deal = full deal analysis; market-analysis = zip code scoring; "
             "buyer-prospect = cash buyer lists; deep-prospect = 4-level research; "
@@ -1007,6 +1355,43 @@ def cli_main() -> None:
         action="store_true",
         dest="no_perspective_correct",
         help="Skip perspective correction in photo preprocessing (photo-import mode)",
+    )
+    # Chesterfield ACA Code Violation report args
+    parser.add_argument(
+        "--aca-start",
+        type=str,
+        default=None,
+        dest="aca_start",
+        help="Override start date YYYY-MM-DD (chesterfield-code-violation mode)",
+    )
+    parser.add_argument(
+        "--aca-end",
+        type=str,
+        default=None,
+        dest="aca_end",
+        help="Override end date YYYY-MM-DD (chesterfield-code-violation mode)",
+    )
+    parser.add_argument(
+        "--aca-first-pull-days",
+        type=int,
+        default=90,
+        dest="aca_first_pull_days",
+        help="Window size in days for the first ACA pull (default 90)",
+    )
+    parser.add_argument(
+        "--aca-headed",
+        action="store_true",
+        dest="aca_headed",
+        help="Run ACA puller with visible browser (default: headless)",
+    )
+    parser.add_argument(
+        "--aca-all-violations",
+        action="store_true",
+        dest="aca_all_violations",
+        help=(
+            "Bypass the HIGH_MOTIVATION_CODE_SECTIONS filter (default = vacant only) "
+            "and emit every Chesterfield code violation case"
+        ),
     )
     # Dropbox watcher arguments
     parser.add_argument(
@@ -1538,6 +1923,16 @@ def cli_main() -> None:
     # Manage sold properties mode — SiftMap workflow
     if args.mode == "manage-sold":
         _run_manage_sold(args)
+        return
+
+    # Richmond Vacant Building List — side feed for code_violation notices
+    if args.mode == "richmond-vacant":
+        _run_richmond_vacant(args)
+        return
+
+    # Chesterfield ACA bulk Code Violation report
+    if args.mode == "chesterfield-code-violation":
+        _run_chesterfield_aca(args)
         return
 
     # PDF import mode — separate pipeline
