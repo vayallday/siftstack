@@ -418,11 +418,29 @@ def _match_results(records: list, lookup_map: list, stats: dict) -> None:
             if not phones and not emails:
                 break
 
-            # Is this the primary DM (#1)?
+            # Is this match the "primary" contact for this notice (gets phones
+            # on the flat NoticeData fields)?
+            #   - Living owner: yes, always primary (we traced the owner directly)
+            #   - Deceased + DM identified: yes if heir_key matches DM name
+            #   - Deceased + NO DM identified (PR pre_probate without obit hit):
+            #     yes if heir_key matches owner_name — i.e. we fell through to
+            #     _get_contacts_for_trace's `else` branch and traced the owner
+            #     directly. Without this clause, phones for ~half the deceased
+            #     records (pre_probate without confirmed obituary) silently
+            #     drop into a non-existent heir_map_json and never reach the
+            #     uploaded DataSift CSV.
+            owner_name_norm = (notice.owner_name or "").strip().lower()
             is_primary = (
-                notice.decision_maker_name
-                and heir_key.lower() == notice.decision_maker_name.strip().lower()
-            ) or notice.owner_deceased != "yes"
+                # Living owner — traced owner_name directly
+                notice.owner_deceased != "yes"
+                # Deceased with identified DM — heir_key matches DM name
+                or (notice.decision_maker_name
+                    and heir_key.lower() == notice.decision_maker_name.strip().lower())
+                # Deceased without DM — we traced the owner; heir_key is owner_name
+                or (not notice.decision_maker_name
+                    and owner_name_norm
+                    and heir_key.lower() == owner_name_norm)
+            )
 
             if is_primary and not notice.primary_phone:
                 # Populate flat NoticeData phone/email fields (backward compat)

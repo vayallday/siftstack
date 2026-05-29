@@ -237,6 +237,11 @@ NOTICE_TYPE_TO_LIST = {
     "eviction": "Eviction",
     "code_violation": "Code Violation",
     "divorce": "Divorce",
+    # Vacant Building List (Richmond bi-annual vacancy registry) — distinct
+    # signal from code_violation per operator (see memory: richmond-code-violations).
+    # If the operator hasn't pre-created a "Vacant Building" list, DataSift's
+    # CSV-import will auto-create it on first upload.
+    "vacant_building": "Vacant Building",
 }
 
 # Additive disposition list — every record uploaded to DataSift lands in BOTH
@@ -277,7 +282,7 @@ def _build_lists_value(notice: NoticeData) -> str:
     return SIFTSTACK_LIST_NAME
 
 
-def _build_tags(notice: NoticeData) -> str:
+def _build_tags(notice: NoticeData, phone_tiers: dict | None = None) -> str:
     """Build comma-separated tags string for DataSift upload.
 
     Tags include:
@@ -289,6 +294,9 @@ def _build_tags(notice: NoticeData) -> str:
     - deceased/living status
     - DM confidence level (for deceased records)
     - has_auction if auction date is upcoming
+    - dial_tier (lowercased best Trestle tier across this record's phones —
+      e.g. "dial_first" / "dial_second"; only when phone_tiers is provided
+      and at least one of the record's phones scored)
     """
     tags = ["Courthouse Data"]
 
@@ -399,7 +407,96 @@ def _build_tags(notice: NoticeData) -> str:
     if notice.source_url and notice.source_url.startswith("photo:"):
         tags.append("photo_import")
 
+    # Trestle phone-tier tag — the BEST tier across the record's phones.
+    # `phone_tiers` is the dict returned by phone_validator.score_record_phones
+    # keyed by cleaned-digit phone string. Operators can filter records by
+    # `dial_first` etc. in DataSift filter presets to prioritize outreach.
+    if phone_tiers:
+        tier_tag = _best_phone_tier_tag(notice, phone_tiers)
+        if tier_tag:
+            tags.append(tier_tag)
+
     return ",".join(tags)
+
+
+# ── Phone-tier helper ────────────────────────────────────────────────
+
+# Lower index = higher priority. Maps to the DEFAULT_TIERS keys in
+# src/phone_validator.py. Keep order in sync if tier names change.
+_TIER_PRIORITY = (
+    ("Dial First", "dial_first"),
+    ("Dial Second", "dial_second"),
+    ("Dial Third", "dial_third"),
+    ("Dial Fourth", "dial_fourth"),
+    ("Drop", "drop"),
+)
+_PHONE_FIELDS = (
+    "primary_phone", "mobile_1", "mobile_2", "mobile_3", "mobile_4",
+    "mobile_5", "landline_1", "landline_2", "landline_3",
+)
+
+
+def _clean_phone_for_lookup(raw: str) -> str:
+    """Strip a phone string down to its digits for dict-key lookup.
+
+    `phone_validator.score_record_phones` keys its results by the cleaned
+    digit form; NoticeData fields may carry formatted strings.
+    """
+    if not raw:
+        return ""
+    digits = "".join(c for c in raw if c.isdigit())
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else ""
+
+
+def _best_phone_tier_tag(notice: NoticeData, phone_tiers: dict) -> str:
+    """Return the highest-priority Trestle tier tag for any phone on the record.
+
+    Looks at the 9 flat NoticeData phone fields AND any signing-heir phones
+    in heir_map_json. Returns "" if none of this record's phones were scored.
+    """
+    if not phone_tiers:
+        return ""
+
+    best_idx = len(_TIER_PRIORITY)  # worse than any real tier
+
+    def _consider(raw_phone: str) -> None:
+        nonlocal best_idx
+        cleaned = _clean_phone_for_lookup(raw_phone)
+        if not cleaned:
+            return
+        entry = phone_tiers.get(cleaned)
+        if not entry:
+            return
+        tier_name = entry.get("tier") or ""
+        for idx, (name, _slug) in enumerate(_TIER_PRIORITY):
+            if name == tier_name:
+                if idx < best_idx:
+                    best_idx = idx
+                break
+
+    # Flat phone fields (primary + mobile_1..5 + landline_1..3)
+    for field in _PHONE_FIELDS:
+        _consider(getattr(notice, field, "") or "")
+
+    # Signing-heir phones in heir_map_json (per
+    # phone_validator.score_record_phones, those entries have a `phone_scores`
+    # list with cleaned numbers — but to keep this lookup tier-agnostic of
+    # that internal shape, just scan any "phones" list on each heir.)
+    heir_json = (notice.heir_map_json or "").strip()
+    if heir_json:
+        try:
+            heirs = json.loads(heir_json)
+        except (json.JSONDecodeError, TypeError):
+            heirs = []
+        for heir in heirs if isinstance(heirs, list) else []:
+            for ph in (heir.get("phones") or []) if isinstance(heir, dict) else []:
+                _consider(ph)
+
+    if best_idx == len(_TIER_PRIORITY):
+        return ""
+    return _TIER_PRIORITY[best_idx][1]
 
 
 def _get_contact_info(notice: NoticeData) -> dict:
@@ -736,19 +833,27 @@ def _validate_row(row: dict) -> tuple[bool, list[str]]:
     return (len(issues) == 0, issues)
 
 
-def _build_row(notice: NoticeData, notes_override: str | None = None) -> dict:
+def _build_row(
+    notice: NoticeData,
+    notes_override: str | None = None,
+    phone_tiers: dict | None = None,
+) -> dict:
     """Build a single CSV row dict for a NoticeData record.
 
     Args:
         notice: The notice to format.
         notes_override: If provided, use this as the Notes value instead of
             calling _build_notes(). Used by write_datasift_split_csvs().
+        phone_tiers: Optional dict from phone_validator.score_record_phones
+            keyed by cleaned-digit phone string. When provided, the row's
+            Tags column gets a `dial_first`/`dial_second`/... tag for the
+            best Trestle tier present on the record.
 
     Returns:
         Dict keyed by DATASIFT_COLUMNS headers.
     """
     contact = _get_contact_info(notice)
-    tags = _build_tags(notice)
+    tags = _build_tags(notice, phone_tiers=phone_tiers)
     lists_value = _build_lists_value(notice)
     notes = notes_override if notes_override is not None else _build_notes(notice)
 
@@ -901,6 +1006,7 @@ def write_datasift_csv(
 def write_datasift_split_csvs(
     notices: list[NoticeData],
     date_str: str | None = None,
+    phone_tiers: dict | None = None,
 ) -> list[dict]:
     """Generate separate DM and Heir Map CSVs for two-upload Message Board flow.
 
@@ -933,7 +1039,11 @@ def write_datasift_split_csvs(
         writer = csv.DictWriter(f, fieldnames=DATASIFT_COLUMNS)
         writer.writeheader()
         for notice in notices:
-            row = _build_row(notice, notes_override=_build_dm_notes(notice))
+            row = _build_row(
+                notice,
+                notes_override=_build_dm_notes(notice),
+                phone_tiers=phone_tiers,
+            )
             is_complete, issues = _validate_row(row)
             if not is_complete:
                 incomplete += 1
@@ -968,7 +1078,11 @@ def write_datasift_split_csvs(
             writer = csv.DictWriter(f, fieldnames=DATASIFT_COLUMNS)
             writer.writeheader()
             for notice in deceased_with_heirs:
-                row = _build_row(notice, notes_override=_build_heir_notes(notice))
+                row = _build_row(
+                    notice,
+                    notes_override=_build_heir_notes(notice),
+                    phone_tiers=phone_tiers,
+                )
                 writer.writerow(row)
                 heir_written += 1
 

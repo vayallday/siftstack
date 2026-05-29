@@ -526,7 +526,12 @@ async def actor_main() -> None:
             do_skip_trace_ds = actor_input.get("skip_trace_datasift", True)
 
             try:
-                csv_infos = write_datasift_split_csvs(notices)
+                # phone_tiers comes from the Trestle scoring step above —
+                # threading it into the formatter lets each row's Tags column
+                # carry a `dial_first` / `dial_second` / etc. tag for the
+                # record's best-ranked phone. Falls back to {} if Trestle
+                # was skipped (no API key) so the formatter is no-op.
+                csv_infos = write_datasift_split_csvs(notices, phone_tiers=phone_tiers)
             except Exception as e:
                 Actor.log.error("DataSift CSV generation failed: %s — skipping DataSift step entirely", e)
                 csv_infos = []
