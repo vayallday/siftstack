@@ -1,20 +1,24 @@
 """KVS-backed state-file persistence for Apify Actor runs.
 
-The Apify Actor's container file system is wiped between runs, but its
-KeyValueStore (KVS) is persistent. State files written to the local FS by
-pullers (e.g., `chesterfield_aca_state.json`, `richmond_vacant_state.json`)
-need to be hydrated from KVS at the start of each run and pushed back to
-KVS at the end.
+The Apify Actor's container file system is wiped between runs, AND each
+new Actor run gets its own fresh "default" KeyValueStore — so writing
+state to the default KVS does NOT survive across scheduled runs. The
+chesterfield + richmond state persistence in the codebase had this latent
+bug too; it was only providing within-run resilience (e.g. surviving
+mid-run host migration) rather than the across-run delta-only behavior
+the operator expected.
 
-This module is intentionally minimal — no schema, no JSON-aware diffing,
-just round-trip the file bytes. Each state file's own loader/saver handles
-parsing.
+Fix: use a NAMED key-value store (`SIFTSTACK_PERSISTENT_KVS_NAME`).
+Named KVS instances are stable across runs of the same actor, so writes
+made by today's 5am cron are readable by tomorrow's 5am cron.
+
+Each helper opens the named KVS itself, so callers don't have to thread
+it through. The named KVS is created on first use.
 
 Usage in actor_main:
-    kvs = await Actor.open_key_value_store()
-    await restore_state_file(kvs, "chesterfield_aca_state.json")
+    await restore_state_file("chesterfield_aca_state.json")
     ... run puller ...
-    await persist_state_file(kvs, "chesterfield_aca_state.json")
+    await persist_state_file("chesterfield_aca_state.json")
 """
 
 from __future__ import annotations
@@ -26,6 +30,18 @@ from typing import Any
 import config
 
 logger = logging.getLogger(__name__)
+
+# Named KVS shared across all scheduled runs of this actor. Apify
+# auto-creates it on first open. Naming convention is per-actor so
+# multiple actors in the same account don't collide.
+SIFTSTACK_PERSISTENT_KVS_NAME = "siftstack-persistent"
+
+
+async def _open_persistent_kvs() -> Any:
+    """Open the cross-run persistent KVS by name. Cached implicitly by
+    the Apify SDK across calls within the same run."""
+    from apify import Actor
+    return await Actor.open_key_value_store(name=SIFTSTACK_PERSISTENT_KVS_NAME)
 
 
 def _kvs_key(state_filename: str) -> str:
@@ -43,13 +59,26 @@ def _state_path(state_filename: str) -> Path:
     return config.PROJECT_ROOT / state_filename
 
 
-async def restore_state_file(kvs: Any, state_filename: str) -> bool:
-    """Restore a state file from KVS to the local filesystem.
+async def restore_state_file(kvs_or_filename, state_filename: str | None = None) -> bool:
+    """Restore a state file from the persistent KVS to the local filesystem.
+
+    Two call shapes are supported for backward compatibility:
+      restore_state_file("chesterfield_aca_state.json")          # new
+      restore_state_file(kvs, "chesterfield_aca_state.json")     # legacy
+
+    In both cases the persistent (named) KVS is used regardless of which
+    handle was passed; the legacy `kvs` argument is silently ignored
+    because passing the run's default KVS was the bug that made cross-
+    run persistence fail to begin with.
 
     Returns True if a state value was found in KVS and written locally.
-    Returns False if KVS has nothing for this key (first run) — caller can
-    proceed; the puller will treat the missing file as a first-time run.
+    Returns False if KVS has nothing for this key (first run).
     """
+    # Normalize args
+    if state_filename is None:
+        state_filename = kvs_or_filename
+    kvs = await _open_persistent_kvs()
+
     key = _kvs_key(state_filename)
     try:
         value = await kvs.get_value(key)
@@ -77,13 +106,21 @@ async def restore_state_file(kvs: Any, state_filename: str) -> bool:
     return True
 
 
-async def persist_state_file(kvs: Any, state_filename: str) -> bool:
-    """Persist a local state file's contents to KVS.
+async def persist_state_file(kvs_or_filename, state_filename: str | None = None) -> bool:
+    """Persist a local state file's contents to the persistent KVS.
+
+    Same backward-compat shape as restore_state_file — the legacy `kvs`
+    argument is accepted but ignored; the named persistent KVS is always
+    used so cross-run state actually survives.
 
     Returns True if the file existed and was written to KVS. Returns False
     if the file is missing (puller never created it — typically because the
     run produced no records and bailed early).
     """
+    if state_filename is None:
+        state_filename = kvs_or_filename
+    kvs = await _open_persistent_kvs()
+
     path = _state_path(state_filename)
     if not path.exists():
         logger.info("No local state file at %s — nothing to persist", path)
@@ -116,18 +153,22 @@ async def persist_state_file(kvs: Any, state_filename: str) -> bool:
 PENDING_RECORDS_KEY = "pending_records.json"
 
 
-async def save_pending_records(kvs: Any, notices: list) -> bool:
-    """Checkpoint the parsed NoticeData list to KVS.
+async def save_pending_records(arg1, arg2=None) -> bool:
+    """Checkpoint the parsed NoticeData list to the persistent KVS.
 
-    Called immediately after the PR puller returns + after merging any
-    restored prior-run records, so the most recent batch of PR-exported
-    records survives a mid-pipeline crash. Clear with
-    `clear_pending_records` once DataSift upload reports success.
+    Accepts either `save_pending_records(notices)` (preferred) or
+    `save_pending_records(kvs, notices)` (legacy — the kvs is ignored).
     """
+    # Normalize args (legacy shape passed a KVS first)
+    if arg2 is not None:
+        notices = arg2
+    else:
+        notices = arg1
+    kvs = await _open_persistent_kvs()
+
     if not notices:
-        # Nothing to save — and we don't want to overwrite a real
-        # checkpoint with an empty one (would lose prior-run records on a
-        # zero-delta day).
+        # Don't overwrite a real checkpoint with an empty one (would lose
+        # prior-run records on a zero-delta day).
         return False
     try:
         import json
@@ -148,13 +189,13 @@ async def save_pending_records(kvs: Any, notices: list) -> bool:
         return False
 
 
-async def restore_pending_records(kvs: Any) -> list:
-    """Restore a previously-checkpointed NoticeData list from KVS.
+async def restore_pending_records(_kvs_legacy=None) -> list:
+    """Restore a previously-checkpointed NoticeData list from the persistent KVS.
 
     Returns an empty list if no checkpoint exists, or if the checkpoint
-    can't be deserialized for any reason (silently skip; the run will
-    proceed with a fresh PR pull).
+    can't be deserialized for any reason. The legacy `kvs` arg is ignored.
     """
+    kvs = await _open_persistent_kvs()
     try:
         value = await kvs.get_value(PENDING_RECORDS_KEY)
     except Exception as e:
@@ -195,11 +236,11 @@ async def restore_pending_records(kvs: Any) -> list:
         return []
 
 
-async def clear_pending_records(kvs: Any) -> None:
-    """Delete the pending-records checkpoint. Call after the day's records
-    have successfully landed in DataSift so the next run doesn't re-process
-    them (they'd just become duplicates in the CRM, modulo DataSift's
-    address-based dedup)."""
+async def clear_pending_records(_kvs_legacy=None) -> None:
+    """Delete the pending-records checkpoint from the persistent KVS. Call
+    after the day's records have successfully landed in DataSift so the
+    next run doesn't re-process them."""
+    kvs = await _open_persistent_kvs()
     try:
         await kvs.set_value(PENDING_RECORDS_KEY, None)
         logger.info("Cleared pending records checkpoint from KVS")
