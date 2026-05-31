@@ -26,6 +26,24 @@ REQUEST_DELAY_MAX = 2.0
 REQUEST_TIMEOUT = 30       # seconds per API call (Zillow can be 0.5-4s+)
 MAX_RETRIES = 2
 
+# Circuit breaker: after this many consecutive auth-class failures
+# (401/402/403), abort the rest of the enrichment loop. Prevents the 2-hour
+# burn we hit on 2026-05-30 when the OpenWeb Ninja plan expired and every
+# record 403'd for ~2954 retry calls (2hr 24min) before the pipeline could
+# reach Zillow exit.
+CONSECUTIVE_AUTH_FAIL_TRIP = 10
+_AUTH_STATUSES = (401, 402, 403)
+
+
+class ZillowAuthError(Exception):
+    """Raised by _fetch_property when the API responds with an auth-class
+    status code (401/402/403). Signals the calling loop that the plan is
+    dead/expired/over-quota and continuing would just waste compute."""
+
+    def __init__(self, status: int, message: str = ""):
+        super().__init__(message or f"Zillow auth-class status {status}")
+        self.status = status
+
 # ── Mapping tables ────────────────────────────────────────────────────
 
 _STATUS_MAP = {
@@ -143,6 +161,15 @@ def _fetch_property(address: str, city: str, state: str, zip_code: str,
             if resp.status_code == 404:
                 logger.debug("Zillow: no data for '%s'", full_address)
                 return None
+            if resp.status_code in _AUTH_STATUSES:
+                # Don't retry on auth-class failures — the plan is dead,
+                # over quota, or the key is wrong. Surface immediately so
+                # the calling loop can trip its circuit breaker.
+                raise ZillowAuthError(
+                    resp.status_code,
+                    f"Zillow {resp.status_code} for '{full_address}' "
+                    f"(auth/quota — plan likely inactive)",
+                )
             if resp.status_code == 429:
                 logger.warning("Zillow rate limit hit -- waiting 10s (attempt %d)", attempt)
                 time.sleep(10)
@@ -154,6 +181,8 @@ def _fetch_property(address: str, city: str, state: str, zip_code: str,
                 return body["data"]
             logger.debug("Zillow: empty/error response for '%s': %s", full_address, body.get("status"))
             return None
+        except ZillowAuthError:
+            raise
         except requests.Timeout:
             logger.warning("Zillow timeout for '%s' (attempt %d/%d)", full_address, attempt, MAX_RETRIES)
         except requests.RequestException as e:
@@ -332,16 +361,43 @@ def enrich_properties(
     failed = 0
     skipped = len(notices) - len(eligible)
     equity_values: list[float] = []
+    # Circuit breaker state — see ZillowAuthError + CONSECUTIVE_AUTH_FAIL_TRIP
+    auth_fail_streak = 0
+    breaker_tripped = False
+    skipped_by_breaker = 0
 
     for idx, (orig_idx, notice) in enumerate(eligible):
+        if breaker_tripped:
+            skipped_by_breaker += 1
+            continue
         if idx > 0:
             delay = random.uniform(REQUEST_DELAY_MIN, REQUEST_DELAY_MAX)
             time.sleep(delay)
 
-        data = _fetch_property(
-            notice.address, notice.city, notice.state, notice.zip,
-            api_key,
-        )
+        try:
+            data = _fetch_property(
+                notice.address, notice.city, notice.state, notice.zip,
+                api_key,
+            )
+            auth_fail_streak = 0  # any non-auth outcome resets the streak
+        except ZillowAuthError as e:
+            auth_fail_streak += 1
+            logger.warning(
+                "Zillow auth failure %d/%d in a row: %s",
+                auth_fail_streak, CONSECUTIVE_AUTH_FAIL_TRIP, e,
+            )
+            failed += 1
+            if auth_fail_streak >= CONSECUTIVE_AUTH_FAIL_TRIP:
+                breaker_tripped = True
+                logger.error(
+                    "Zillow circuit breaker TRIPPED at %d/%d records — "
+                    "%d consecutive auth-class failures (plan likely inactive "
+                    "or over quota). Remaining %d records will skip Zillow.",
+                    idx + 1, len(eligible),
+                    auth_fail_streak,
+                    len(eligible) - (idx + 1),
+                )
+            continue
 
         if data is None:
             failed += 1
@@ -368,9 +424,12 @@ def enrich_properties(
     if equity_values:
         avg = sum(equity_values) / len(equity_values)
         avg_equity = f", avg equity=${avg:,.0f}"
+    breaker_note = ""
+    if breaker_tripped:
+        breaker_note = f", BREAKER_TRIPPED (skipped {skipped_by_breaker} after auth failures)"
     logger.info(
-        "Zillow enrichment complete: %d enriched, %d failed, %d skipped%s",
-        enriched, failed, skipped, avg_equity,
+        "Zillow enrichment complete: %d enriched, %d failed, %d skipped%s%s",
+        enriched, failed, skipped + skipped_by_breaker, avg_equity, breaker_note,
     )
 
     return notices
