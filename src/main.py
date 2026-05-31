@@ -378,11 +378,28 @@ async def actor_main() -> None:
             # PR has no Added-Date filter; delta is a membership-set diff
             # against pr_state.json (see plan 02-04 SUMMARY). `mode` is
             # accepted only for back-compat — PR ignores it.
+            #
+            # Persist pr_state.json across Apify runs. The container FS is
+            # wiped between runs, so without this every run sees ALL 1,477
+            # current list members as "new" and re-exports the whole list —
+            # burning PR export quota AND running full enrichment on records
+            # already in DataSift. With KVS round-trip, only the actual delta
+            # (~30-50/day) gets exported and enriched. Same pattern as
+            # chesterfield + richmond modes use via apify_state.py.
+            import apify_state
+            await apify_state.restore_state_file(kvs, "pr_state.json")
+
             from propertyradar_puller import pull_all_lists
             Actor.log.info("Running PropertyRadar puller (mode=%s)", mode)
             notices = await pull_all_lists(
                 download_dir=config.OUTPUT_DIR,
             )
+
+            # Persist updated state immediately after the puller so a downstream
+            # failure (Zillow circuit breaker, obit timeout, etc.) doesn't cost
+            # us tomorrow's delta math. The puller wrote pr_state.json per-list
+            # as it ran, so this is just the round-trip back to KVS.
+            await apify_state.persist_state_file(kvs, "pr_state.json")
 
             # ── Enrichment ────────────────────────────────────────────
             from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline
