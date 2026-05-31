@@ -389,9 +389,22 @@ async def actor_main() -> None:
             import apify_state
             await apify_state.restore_state_file(kvs, "pr_state.json")
 
+            # Resume any in-flight records from a prior run that died after PR
+            # export but before DataSift upload. The 2026-05-31 run lost 1,478
+            # records this way when Apify migrated the container mid-obit;
+            # without this checkpoint they were paid-for at PR but never
+            # reached the CRM. Checkpoint is cleared after a successful
+            # upload below; if it's still here, the prior run didn't finish.
+            resumed_notices = await apify_state.restore_pending_records(kvs)
+            if resumed_notices:
+                Actor.log.info(
+                    "Resuming %d records from prior incomplete run — DataSift "
+                    "upload didn't land last time", len(resumed_notices),
+                )
+
             from propertyradar_puller import pull_all_lists
             Actor.log.info("Running PropertyRadar puller (mode=%s)", mode)
-            notices = await pull_all_lists(
+            new_notices = await pull_all_lists(
                 download_dir=config.OUTPUT_DIR,
             )
 
@@ -400,6 +413,28 @@ async def actor_main() -> None:
             # us tomorrow's delta math. The puller wrote pr_state.json per-list
             # as it ran, so this is just the round-trip back to KVS.
             await apify_state.persist_state_file(kvs, "pr_state.json")
+
+            # Merge resumed + new records, dedupe by source_url (each PR
+            # record has a unique propertyradar://radarid/{RadarID} URL).
+            seen_urls: set[str] = set()
+            notices = []
+            for n in (resumed_notices + new_notices):
+                key = n.source_url or ""
+                if key and key in seen_urls:
+                    continue
+                if key:
+                    seen_urls.add(key)
+                notices.append(n)
+            if resumed_notices and new_notices:
+                Actor.log.info(
+                    "Merged checkpoint: %d resumed + %d new → %d unique",
+                    len(resumed_notices), len(new_notices), len(notices),
+                )
+
+            # Checkpoint the merged list so a crash before DataSift upload
+            # doesn't lose them. Cleared at the end after upload success.
+            if notices:
+                await apify_state.save_pending_records(kvs, notices)
 
             # ── Enrichment ────────────────────────────────────────────
             from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline
@@ -590,6 +625,10 @@ async def actor_main() -> None:
                     )
                     if upload_result.get("success"):
                         Actor.log.info("DataSift upload OK: %s", upload_result.get("message", ""))
+                        # Records made it to the CRM — drop the pending-records
+                        # checkpoint so tomorrow's run starts fresh instead of
+                        # re-processing the same set.
+                        await apify_state.clear_pending_records(kvs)
                     else:
                         Actor.log.warning(
                             "DataSift upload reported failure: %s — KVS-CSV fallback still saved below",
