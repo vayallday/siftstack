@@ -445,6 +445,17 @@ async def actor_main() -> None:
                 skip_vacant_filter=include_vacant,
                 skip_commercial_filter=include_commercial,
                 skip_entity_filter=include_entities,
+                # OPP code-case enrichment (energov.richmondgov.com) populates 8
+                # opp_* fields on Richmond City records but those fields aren't
+                # mapped into datasift_formatter, report_generator, or the Tags
+                # column — so the API call's output never reaches any consumer
+                # downstream. Operator-confirmed 2026-06-02 the data isn't used,
+                # so skip the step to save ~30 sec/day on Richmond-heavy runs
+                # and avoid loading the public EnerGov portal unnecessarily.
+                # If/when OPP data ever gets wired into DataSift tags (e.g. an
+                # `opp_active_violation` tag for filter presets), flip this back
+                # to default False.
+                skip_opp=True,
                 source_label="Apify Actor",
             )
             notices = run_enrichment_pipeline(notices, opts)
