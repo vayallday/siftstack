@@ -633,6 +633,12 @@ async def actor_main() -> None:
                         headless=True,
                         enrich=do_enrich_ds,
                         skip_trace=do_skip_trace_ds,
+                        # Target the existing `SiftStack` list instead of
+                        # creating a fresh `SiftStack {date} - DMs` list per
+                        # day. Records categorize into per-type lists
+                        # (Foreclosure, Pre-Probate, etc.) via the Lists CSV
+                        # column regardless of which list this upload targets.
+                        existing_list=True,
                     )
                     if upload_result.get("success"):
                         Actor.log.info("DataSift upload OK: %s", upload_result.get("message", ""))

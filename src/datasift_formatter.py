@@ -1062,7 +1062,13 @@ def write_datasift_split_csvs(
     results.append({
         "path": dm_path,
         "label": "DMs",
-        "list_name": f"SiftStack {date_str} - DMs",
+        # Target the operator's single pre-existing `SiftStack` list. Without a
+        # stable name DataSift was creating a new list every day
+        # (`SiftStack 2026-06-01 - DMs`, ...) and burying the per-notice-type
+        # categorization. Records still land in the right per-type lists
+        # (Foreclosure, Pre-Probate, etc.) via the Lists CSV column —
+        # see _build_lists_value.
+        "list_name": SIFTSTACK_LIST_NAME,
     })
 
     # CSV 2: Heirs — only deceased with heir data
@@ -1090,7 +1096,11 @@ def write_datasift_split_csvs(
         results.append({
             "path": heir_path,
             "label": "Heirs",
-            "list_name": f"SiftStack {date_str} - Heirs",
+            # Same `SiftStack` target as the DMs upload. DataSift's address-based
+            # dedup merges the Heirs rows into the existing DM records and
+            # appends the heir-map Message Board entry as a second comment —
+            # the originally-intended two-upload Message Board pattern.
+            "list_name": SIFTSTACK_LIST_NAME,
         })
     else:
         logger.info("No deceased records with heir data — skipping Heirs CSV")
