@@ -302,7 +302,11 @@ PROPERTYRADAR_LISTS: list[PropertyRadarList] = [
         slug="md_auction",
     ),
     PropertyRadarList(
-        name="VA_Auction in 90 Days_No Pre-Probate_No Vacant",
+        # NOTE: the live PR list is "VA_Auction 90 Days…" (NO "in") — unlike its
+        # MD twin. The mismatch made list-nav-by-name fail every run, silently
+        # dropping ALL VA foreclosures. Verified against the run's candidate-list
+        # dump 2026-06-04. Keep verbatim to the PR UI string.
+        name="VA_Auction 90 Days_No Pre-Probate_No Vacant",
         state="VA",
         notice_type="foreclosure",
         slug="va_auction",

@@ -113,7 +113,7 @@ Four lists are pre-configured on the PR account and locked into `propertyradar_c
 | Slug | List name | Notice type |
 |---|---|---|
 | `md_auction` | `MD_Auction in 90 Days_No Pre-Probate_No Vacant` | `foreclosure` |
-| `va_auction` | `VA_Auction in 90 Days_No Pre-Probate_No Vacant` | `foreclosure` |
+| `va_auction` | `VA_Auction 90 Days_No Pre-Probate_No Vacant` (NO "in" — unlike MD twin) | `foreclosure` |
 | `md_pre_probate` | `MD_Pre-Probate_Distress >60_Occupied` | `pre_probate` |
 | `va_pre_probate` | `VA_Pre-Probate_Distress >60_Occupied` | `pre_probate` |
 
