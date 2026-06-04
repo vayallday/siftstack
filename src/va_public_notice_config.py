@@ -137,9 +137,15 @@ TARGET_NOTICE_TYPES: tuple[str, ...] = ("foreclosure", "probate", "tax_sale")
 
 @dataclass(frozen=True)
 class TargetLocality:
-    """A buy-box locality → its exact County checkbox label + canonical county."""
-    checkbox_label: str   # EXACT <label> text in the lstCounty CheckBoxList
+    """A buy-box locality → its exact checkbox label + canonical county.
+
+    Most localities are in the County CheckBoxList (``list_kind="county"``).
+    A few VA independent cities (e.g. Alexandria) are NOT in the County list and
+    are only filterable via the City CheckBoxList (``list_kind="city"``).
+    """
+    checkbox_label: str   # EXACT <label> text in the lstCounty / lstCity CheckBoxList
     county_display: str   # what SiftStack stamps on NoticeData.county
+    list_kind: str = "county"   # "county" → lstCounty, "city" → lstCity
 
 
 # Operator buy-box: 4 primary VA markets + nearby (2026-06-02). All 8 live in
@@ -155,6 +161,21 @@ TARGET_LOCALITIES: list[TargetLocality] = [
     TargetLocality("Goochland", "Goochland County"),
     TargetLocality("Powhatan", "Powhatan County"),
     TargetLocality("Fairfax", "Fairfax County"),
+    # Hampton Roads independent cities + Alexandria (added per operator 2026-06-04).
+    # Labels VERIFIED against the live lstCounty CheckBoxList — note the "City"
+    # suffix on Norfolk / Newport News / Suffolk: the bare "Norfolk" etc. are
+    # finer-grained lstCity entries, NOT the publication jurisdiction.
+    TargetLocality("Norfolk City", "Norfolk"),
+    TargetLocality("Virginia Beach", "Virginia Beach"),
+    TargetLocality("Portsmouth", "Portsmouth"),
+    TargetLocality("Chesapeake", "Chesapeake"),
+    TargetLocality("Hampton", "Hampton"),
+    TargetLocality("Newport News City", "Newport News"),
+    TargetLocality("Suffolk City", "Suffolk"),
+    # Alexandria is NOT in the County CheckBoxList — only the City list has it,
+    # so it's matched via list_kind="city" (verified present in lstCity).
+    # (Prince William is already covered above.)
+    TargetLocality("Alexandria", "Alexandria", list_kind="city"),
 ]
 
 # ── Source URL scheme ──────────────────────────────────────────────────

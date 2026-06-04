@@ -55,7 +55,7 @@ python src/main.py chesterfield-code-violation --aca-headed                     
 
 # Virginia Public Notice (VPA) — publicnoticevirginia.com (Estate Claims/Foreclosures/Tax Deeds)
 # Needs a FREE VPA Smart Search account (VAPN_EMAIL/VAPN_PASSWORD) + CAPTCHA_API_KEY (2Captcha)
-python src/main.py va-public-notice                        # daily delta since last run, all 3 categories × 8 VA localities
+python src/main.py va-public-notice                        # daily delta since last run, all 3 categories × 16 VA localities
 python src/main.py va-public-notice --va-mode historical   # last 12 months
 python src/main.py va-public-notice --va-since 2026-05-01   # custom since-date
 python src/main.py va-public-notice --va-headed             # visible browser for debugging
@@ -504,11 +504,20 @@ reliably imply a notice_type. Instead the puller (verified live 2026-06-03):
 Divorce was dropped (no clean signal, low value). Notice taxonomy unchanged —
 reuses existing `probate`/`foreclosure`/`tax_sale` types + DataSift list maps.
 
-### Target localities (VA buy-box + nearby)
-Exact County-checkbox labels: **Richmond City** (NOT "Richmond", which is the
-rural Richmond County on the Northern Neck), Henrico, Chesterfield, Prince
-William, Hanover, Goochland, Powhatan, Fairfax. Checkboxes render offscreen, so
-they're ticked via JS (`checked` + dispatched events), matched on exact label.
+### Target localities (VA buy-box + nearby) — 16 total
+Exact checkbox labels (VERIFIED live against the lstCounty/lstCity lists):
+- **County list (15):** **Richmond City** (NOT "Richmond", the rural Richmond
+  County on the Northern Neck), Henrico, Chesterfield, Prince William, Hanover,
+  Goochland, Powhatan, Fairfax, **Norfolk City**, Virginia Beach, Portsmouth,
+  Chesapeake, Hampton, **Newport News City**, **Suffolk City**. Note the "City"
+  suffix on Norfolk/Newport News/Suffolk — the bare names are finer-grained
+  lstCity entries, not the publication jurisdiction.
+- **City list only (1):** **Alexandria** — not present in the County list, so
+  `TargetLocality(..., list_kind="city")` ticks it in the lstCity CheckBoxList.
+
+Checkboxes render offscreen, so they're ticked via JS (`checked` + dispatched
+events), matched on exact label. `list_kind` (default `"county"`) selects which
+CheckBoxList (`lstCounty` vs `lstCity`) `_check_locality` searches.
 
 ### Throughput note
 Each notice detail requires a 2Captcha reCAPTCHA-v2 solve (~30-90s). Daily

@@ -227,12 +227,15 @@ async def _shot(page: Page, name: str) -> None:
 # ── Search form ────────────────────────────────────────────────────────
 
 
-async def _check_locality(page: Page, checkbox_label: str) -> bool:
-    """Tick the County CheckBoxList item whose label EXACTLY matches.
+async def _check_locality(page: Page, checkbox_label: str,
+                          prefix: str = vacfg.SEL_COUNTY_LABEL_PREFIX) -> bool:
+    """Tick the CheckBoxList item whose label EXACTLY matches.
 
-    The checkboxes render offscreen (offsetParent null) so Playwright's
-    visibility-gated ``check()`` fails — set ``checked`` + dispatch events via JS.
-    Returns True if a matching box was found and checked.
+    ``prefix`` selects which list to search — the County list (default) or the
+    City list (for VA independent cities like Alexandria that aren't in the
+    County list). The checkboxes render offscreen (offsetParent null) so
+    Playwright's visibility-gated ``check()`` fails — set ``checked`` + dispatch
+    events via JS. Returns True if a matching box was found and checked.
     """
     checked_id = await page.evaluate(
         """(args) => {
@@ -250,12 +253,12 @@ async def _check_locality(page: Page, checkbox_label: str) -> bool:
             }
             return null;
         }""",
-        [vacfg.SEL_COUNTY_LABEL_PREFIX, checkbox_label],
+        [prefix, checkbox_label],
     )
     if checked_id:
-        logger.debug("Checked county %r (%s)", checkbox_label, checked_id)
+        logger.debug("Checked locality %r (%s)", checkbox_label, checked_id)
         return True
-    logger.warning("County checkbox label %r not found", checkbox_label)
+    logger.warning("Locality checkbox label %r not found (prefix=%s)", checkbox_label, prefix)
     return False
 
 
@@ -582,7 +585,9 @@ async def _run_search(
         }""",
         [vacfg.SEL_KEYWORD_ID, vacfg.SEL_MATCH_OR_ID, vacfg.SEARCH_KEYWORD],
     )
-    if not await _check_locality(page, label):
+    prefix = (vacfg.SEL_CITY_CHECKBOX_PREFIX if locality.list_kind == "city"
+              else vacfg.SEL_COUNTY_LABEL_PREFIX)
+    if not await _check_locality(page, label, prefix):
         return []
     await _set_date_window(page, since_date, mode)
     await _delay()
