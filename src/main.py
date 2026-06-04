@@ -2126,7 +2126,7 @@ def cli_main() -> None:
         _run_richmond_vacant(args)
         return
 
-    # Chesterfield ACA bulk Code Violation report
+    # Virginia Public Notice (VPA) — estate/foreclosure/tax-deed notices
     if args.mode == "va-public-notice":
         _run_va_public_notice(args)
         return
