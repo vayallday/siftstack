@@ -44,6 +44,23 @@ python src/main.py historical                     # same flow (PR has no Added-D
 python src/main.py daily --split                  # separate CSV per list
 python src/main.py daily -v                       # verbose/debug logging
 
+# Richmond Vacant Building List — vacancy registry feed (notice_type=vacant_building, NOT code_violation)
+python src/main.py richmond-vacant                # probe rva.gov for newest PDF, diff vs state, enrich, CSV
+
+# Chesterfield ACA bulk Code Violation report (anonymous, public Accela Citizen Access)
+python src/main.py chesterfield-code-violation                                  # delta since last pull (90-day window first time)
+python src/main.py chesterfield-code-violation --aca-start 2026-05-01           # custom window start
+python src/main.py chesterfield-code-violation --aca-start 2026-05-01 --aca-end 2026-05-25
+python src/main.py chesterfield-code-violation --aca-headed                     # visible browser for debugging
+
+# Virginia Public Notice (VPA) — publicnoticevirginia.com (Estate Claims/Foreclosures/Tax Deeds)
+# Needs a FREE VPA Smart Search account (VAPN_EMAIL/VAPN_PASSWORD) + CAPTCHA_API_KEY (2Captcha)
+python src/main.py va-public-notice                        # daily delta since last run, all 3 categories × 8 VA localities
+python src/main.py va-public-notice --va-mode historical   # last 12 months
+python src/main.py va-public-notice --va-since 2026-05-01   # custom since-date
+python src/main.py va-public-notice --va-headed             # visible browser for debugging
+python -m va_public_notice_puller --headed --since 2026-05-25   # standalone diagnostic
+
 # DataSift preset/sequence management
 python src/main.py manage-presets --discover                      # list all presets and sequences
 python src/main.py manage-presets --add-sold-exclusion            # add Sold exclusion to all presets
@@ -133,19 +150,41 @@ apify push
 ```
 
 ### Actor Input (configured in Apify Console or `input.json`)
-- `mode`: "daily" or "historical" (PropertyRadar pulls; mode is informational — delta is membership-diff)
-- `pr_username`, `pr_password`: PropertyRadar login secrets (required)
-- `google_drive_folder_id`, `google_service_account_key`: optional Google Drive upload
+- `mode` (required, enum): one of
+  - `daily` / `historical` — PropertyRadar list pulls. Requires `pr_username` + `pr_password`. Delta is membership-diff; the two modes behave identically (PR has no Added-Date filter).
+  - `chesterfield-code-violation` — Chesterfield ACA bulk code violation report (anonymous, no creds). Daily-cadence recommended.
+  - `richmond-vacant` — Richmond Vacant Building List vacancy registry (anonymous, no creds). Bi-annual cadence; safe to schedule monthly (no-ops if no new publication).
+  - `va-public-notice` — Virginia Press Association notices (Estate Claims→probate, Foreclosures→foreclosure, Tax Deeds→tax_sale). Requires `vapn_username` + `vapn_password` + `captcha_api_key`. Daily-cadence recommended.
+- `pr_username`, `pr_password`: PropertyRadar login secrets — required ONLY for `daily` / `historical`.
+- `vapn_username`, `vapn_password`, `captcha_api_key`: VPA Smart Search login + 2Captcha key — required ONLY for `va-public-notice`. Optional `va_mode` (daily/historical), `va_since` (YYYY-MM-DD).
+- `aca_start`, `aca_end`, `aca_first_pull_days`: optional date-window overrides for `chesterfield-code-violation` mode.
+- `google_drive_folder_id`, `google_service_account_key`: optional Google Drive upload (all modes).
+- `upload_datasift`, `enrich_datasift`, `skip_trace_datasift`: DataSift upload toggles (all modes).
 
 ### Actor Output
 - **Dataset**: structured records pushed via `Actor.push_data()`
 - **Key-value store**: `output.csv` backup
 - **Google Drive** (optional): CSV + summary text file uploaded via service account
+- **KVS state files** (new): `state__chesterfield_aca_state.json`, `state__richmond_vacant_state.json`, and `state__va_public_notice_state.json` — round-tripped at start/end of each Actor run so deltas persist across the ephemeral Actor file system. See `src/apify_state.py`.
+
+### Setting up scheduled runs in the Apify Console
+1. Apify Console → Actors → `siftstack` → **Schedules** tab → New schedule.
+2. **Daily Chesterfield code violation pull** (recommended):
+   - Cron: `0 9 * * *` (or operator's preferred time)
+   - Input: `{"mode": "chesterfield-code-violation"}` plus any DataSift/Drive secrets — schedule input does NOT inherit Actor's Default Input (see memory: apify-schedule-input-independent).
+3. **Daily PropertyRadar pull** (existing):
+   - Cron: `0 10 * * *` (one hour after Chesterfield, or operator's preferred 5am)
+   - Input: `{"mode": "daily", "pr_username": "...", "pr_password": "..."}` plus all enrichment / DataSift secrets.
+4. **Richmond Vacant Building List** (manual on-demand): no schedule. Run from Apify Console → Run Actor → set `mode: "richmond-vacant"` → Start when you hear a new publication has dropped (~every 6 months).
+5. **Daily Virginia public-notice pull**:
+   - Cron: `0 8 * * *` (or operator's preferred time)
+   - Input: `{"mode": "va-public-notice", "vapn_username": "...", "vapn_password": "...", "captcha_api_key": "..."}` plus enrichment / DataSift secrets — schedule input does NOT inherit Default Input.
 
 ### Key Files
 - `.actor/actor.json` — Actor manifest (name, version, Dockerfile path)
 - `.actor/input_schema.json` — Input fields + validation for Apify Console UI
 - `Dockerfile` — Based on `apify/actor-python-playwright:3.12`
+- `src/apify_state.py` — KVS state-file persistence helper (NEW — used by the chesterfield + vacant feed modes; PR pull still uses local `pr_state.json` which has a latent persistence gap on Apify worth fixing in a separate phase)
 - `src/drive_uploader.py` — Google Drive upload via base64-encoded service account key
 - `input.json` — Local test input (gitignored, contains credentials)
 
@@ -208,6 +247,301 @@ Courthouse probate records have decedent name + PR/executor name but NO property
 - `numpy>=1.26.0` — required by OpenCV
 - `dropbox>=12.0.2` — Dropbox SDK (minimum for post-Jan-2026 API compatibility)
 
+## Richmond Vacant Building List — Vacancy Registry Feed (build 1.0.30+)
+
+Richmond Property Maintenance & Code Enforcement publishes a Vacant Building
+List PDF on `rva.gov`. **This is a vacancy registry, NOT a code violation source.**
+Operator-confirmed taxonomy (2026-05-25):
+- **Richmond code violations** → OPP / EnerGov portal (see "Richmond OPP" section)
+- **Richmond vacancy registry** → this PDF
+- **Richmond full code violation caseload bulk** → email request to
+  `PropertyMaintenance@rva.gov`, then drop response into
+  `{DROPBOX_ROOT_FOLDER}/Richmond/code_violation/` for the existing Dropbox pipeline.
+
+### Key Files
+- `src/richmond_vacant_puller.py` — probes URL pattern, fetches PDF, parses via
+  pdfplumber (clean 6-column extraction), diffs against `richmond_vacant_state.json`,
+  returns `NoticeData` records typed as `notice_type="vacant_building"` with
+  `source_url="richmond_vacant_building_list://YYYY-MM"`.
+- `richmond_vacant_state.json` — at PROJECT_ROOT. Tracks last fetched URL,
+  content hash, and a `known_records` index keyed by `sha256(address|owner)[:16]`.
+
+### URL pattern
+```
+https://rva.gov/sites/default/files/{YYYY-MM}/Vacant%20Building%20List%20-%20{Month}%20{YYYY}.pdf
+```
+
+### Cadence — IMPORTANT
+**Cadence is bi-annual** (~6 months apart), NOT monthly. The puller still
+probes the last 6 months and uses content-hash change detection so it stays
+robust to off-cycle publications. See memory: [richmond-code-violations](memory)
+for operator confirmation.
+
+### Schema (per parsed row)
+| PDF column | NoticeData field |
+|---|---|
+| Address (with property ZIP) | `address` + `zip` (split on `, NNNNN$`) |
+| Owner | `owner_name` |
+| MailAddress | `owner_street` |
+| MailCity | `owner_city` |
+| State | `owner_state` |
+| MailZip | `owner_zip` |
+
+`city="Richmond"`, `state="VA"`, `county="Richmond City"` are constants.
+
+### CLI
+```bash
+python src/main.py richmond-vacant                # fetch + enrich + write CSV to output/
+python src/main.py richmond-vacant --upload-datasift  # also push to DataSift
+```
+
+### Disposition routing
+- Vacant Building List records → `notice_type="vacant_building"` → DataSift
+  list `"Vacant Building"` (auto-created from CSV on first upload if absent).
+- Richmond code violations (OPP enricher fields OR email-requested caseload)
+  → `notice_type="code_violation"` → DataSift list `"Code Violation"`.
+- `source_url="richmond_vacant_building_list://YYYY-MM"` always identifies
+  records from this specific PDF.
+
+### Dependencies (added to requirements.txt)
+- `pdfplumber>=0.11.0` — clean table extraction for digital PDFs (no OCR needed)
+
+## Richmond OPP / EnerGov Per-Address Code-Case Enricher (build 1.0.31+)
+
+Richmond City's [Tyler EnerGov Self-Service portal](https://energov.richmondgov.com/EnerGov_Prod/SelfService/richmondvaprod#/home)
+exposes permits + code cases per-address. The SPA is backed by a JSON API
+that accepts **anonymous direct HTTP calls** with three Tyler tenant
+headers — no Playwright needed at runtime.
+
+The pipeline calls this as **Step 7b** for every Richmond City record,
+attaching active code violations, recent permits, and the Richmond parcel ID
+as new `NoticeData` fields. Non-Richmond records are self-filtered (no API
+call). Records in Henrico/Chesterfield/Hanover are explicitly excluded even
+when their `county` field contains "Richmond" (e.g., "North Richmond" in
+N. Chesterfield).
+
+### Key Files
+- `src/richmond_opp_enricher.py` — `enrich_notices(notices)` is the public entry
+  point. Pipeline integration in [src/enrichment_pipeline.py](src/enrichment_pipeline.py).
+- Recon scripts (one-off, kept for reference): `test_richmond_opp_recon.py`,
+  `test_richmond_opp_api.py`.
+
+### API contract (verified 2026-05-25)
+- Endpoint: `POST https://energov.richmondgov.com/energov_prod/selfservice/api/energov/search/search`
+- Auth: anonymous. Required headers:
+  - `tenantid: 1`
+  - `tenantname: richmondvaprod`
+  - `tyler-tenanturl: richmondvaprod`
+  - `tyler-tenant-culture: en-US`
+  - `referer: https://energov.richmondgov.com/EnerGov_Prod/SelfService/richmondvaprod`
+  - `Content-Type: application/json;charset=UTF-8`
+- POST body: see `_BASE_PAYLOAD` in the enricher module — all nested
+  `*Criteria` blocks default to null; only `Keyword` is swapped per call.
+- Response shape: `Result.EntityResults[]` — unified array across permits,
+  code cases, inspections, plans. Filter by `CaseType` substring.
+
+### Address handling
+- Operator instruction (per the Richmond Property Maintenance & Code Enforcement
+  office): strip the street suffix from the search input. `"10 E Baker St"` →
+  `"10 E Baker"`. Suffixes: St/Ave/Rd/Dr/Ln/Blvd/Way/Cir/Ct/Pl/Pkwy/Ter/Tpke/Trl/Hwy/Loop/Run/Pike/Sq/Pt/Cv/Bnd/Mews/Walk/Park/Row.
+- API uses **fuzzy keyword matching, NOT exact address**. `"102 E Broad"` returns
+  both `102 E Broad St` AND `102 E Broad Rock Rd`. Enricher post-filters results
+  by matching house number + direction + first street word against the
+  decomposed `Address` fields in each response entity.
+
+### Detection rules
+- **Active code violation**: `CaseType` contains one of `code`, `maintenance`,
+  `compliance`, `code violation`; AND `CaseStatus` contains one of
+  `in violation`, `open`, `re-inspection`, `notice issued`.
+- **Recent permit**: NOT a code case; AND `ApplyDate` within last 2 years.
+
+### NoticeData fields added (see [src/notice_parser.py](src/notice_parser.py))
+- `opp_checked` — `yes` | `skip_bad_address` | `http_error` | `network_error` | ``
+- `opp_active_violation_count`
+- `opp_total_code_case_count`
+- `opp_recent_permit_count`
+- `opp_active_violation_cases` — pipe-separated case numbers (top 5)
+- `opp_latest_violation_status`
+- `opp_latest_violation_date` (YYYY-MM-DD)
+- `opp_parcel_id` — Richmond `MainParcel` (assessor parcel ID)
+
+### Pipeline integration
+- Step 7b in [src/enrichment_pipeline.py](src/enrichment_pipeline.py), between Smarty/geocode and Zillow.
+- Default ON. Skip with `PipelineOptions(skip_opp=True)`.
+- Chesterfield ACA puller passes `skip_opp=True` explicitly (no Richmond records).
+- Rate limit: 0.4s between API calls (~150 req/min — well below any plausible
+  public-API threshold).
+
+### Smoke test
+```bash
+python -m richmond_opp_enricher "10 E Baker St"   # known violation property (12 active cases)
+```
+
+## Chesterfield ACA Code Violation Bulk Feed (build 1.0.31+)
+
+Chesterfield County exposes a public **date-range Code Violation report** on its
+Accela Citizen Access (ACA) portal. Anonymous access — no login required for
+the Reports section (the case-search Enforcement module IS login-walled, but
+that's a separate path). Newly-launched feature confirmed by the Chesterfield
+code enforcement office 2026-05-25.
+
+### Key Files
+- `src/chesterfield_aca_puller.py` — Playwright drives the report form, downloads
+  XLSX, parses via openpyxl, diffs against `chesterfield_aca_state.json`.
+- `chesterfield_aca_state.json` — at PROJECT_ROOT. Tracks `known_record_ids` for
+  dedup + last window for incremental pulls.
+
+### URL contract (verified 2026-05-25)
+- Form URL: `https://aca-prod.accela.com/CHESTERFIELD/Report/ReportParameter.aspx?module=&reportID=9735&reportType=LINK_REPORT_LIST`
+- Date inputs: `#Date_11907` (Start), `#Date_11908` (End) — AjaxControlToolkit
+  MaskedEdit widgets. `page.fill()` is rejected by the validator; use
+  click → Ctrl+A → Delete → `page.type()` with 40ms per-keystroke delay → Tab.
+- Submit: `#btnSave`. Triggers a **same-page XLSX download** (NOT a popup).
+- Wait ~1.2s after typing dates before submit so validators finish.
+- Server-side report gen takes 30-120s — `page.expect_download(timeout=180000)`.
+
+### XLSX schema (header at row 3, 0-indexed)
+| Column | Sample |
+|---|---|
+| Record Type | `Property Maintenance` (PM*) or `Zoning Code Compliance` (CE*) |
+| Record ID | `PM26-0029`, `CE26-0877` — perfect dedup key |
+| Submittal Date | datetime |
+| Record Status Date | datetime |
+| Record Status | `In Violation`, `Closed`, `Abated`, `Submitted`, `Pending NOV` |
+| Code Section | `304.12 - Handrails and guards`, `11-32(a) - Tall Grass/Occupied` |
+| Property Address | UPPERCASE street, no city/zip — e.g. `219 HAZELMERE DR` |
+
+### High-motivation Code Section filter
+By default the puller emits ONLY records whose case cites a Code Section
+matching one of the patterns in
+`src/chesterfield_aca_puller.py::HIGH_MOTIVATION_CODE_SECTIONS`. Default = `["vacant"]`,
+which catches `11-32(b) - Tall Grass/Vacant` and any future Vacant-named
+section. Cases that don't match are still added to
+`chesterfield_aca_state.json` (so dedup works) but not emitted as leads.
+
+To bypass the filter:
+- CLI: `python src/main.py chesterfield-code-violation --aca-all-violations`
+- Apify input: `"aca_all_violations": true`
+
+To widen the filter, edit `HIGH_MOTIVATION_CODE_SECTIONS` in
+`src/chesterfield_aca_puller.py`. Candidate extensions (from May 2026 30-day recon):
+
+| Pattern | Records (per month) | Signal strength |
+|---|---:|---|
+| `"vacant"` (default) | 76 | Strong — explicit vacant |
+| `"Discarded Materials"` | 41 | Strong — abandoned junk |
+| `"Inoperable Vehicle"` | 39 | Strong — dead car / neglect |
+| `"Trash/Litter"` | 7 | Moderate |
+| `"Tall Grass/Occupied"` | 132 | Weak — owner present |
+
+**Widening the filter requires deleting state to re-emit historical matches.**
+Filtered-out records added to state on prior runs won't be re-evaluated.
+
+A single Record ID can cite multiple Code Sections; the puller groups rows
+by Record ID and emits one NoticeData per case with all sections pipe-joined
+in `raw_text`. Cases that combine vacant + other distress signals (e.g.
+`11-32(b) - Tall Grass/Vacant | 13-62 - Inoperable Vehicle | 11-31 - Trash/Litter`)
+are the richest leads in the dataset.
+
+### Notes
+- XLSX has no owner/city/zip. `city=""`, `state="VA"`, `county="Chesterfield County"`.
+  Smarty fills the city/zip downstream from the property address.
+- Records emit as `notice_type="code_violation"` with
+  `source_url="chesterfield_aca_report://{record_id}"` for downstream
+  disambiguation from the Richmond Vacant Building List feed.
+- Volume per recon: ~12 cases/day, ~370/month total. After default filter
+  (`vacant` only), ~76/month = ~2.5 emitted leads/day.
+
+### Dependencies (already in requirements.txt)
+- `playwright>=1.40.0` — drives the ASP.NET WebForms flow
+- `openpyxl>=3.1.0` — parses the XLSX download
+
+## Virginia Public Notice (VPA) Acquisition Source (build 1.0.32+)
+
+The Virginia Press Association publishes a statewide public-notice registry at
+**publicnoticevirginia.com** (NOT `vapublicnotice.com`, which refuses
+connections). The `va-public-notice` mode scrapes it for the notice types
+PropertyRadar can't reach in VA — chiefly **court probate** (Estate Claims).
+
+**This is the SAME ASP.NET "Smart Search" platform as the archived
+tnpublicnotice.com** (identical `authenticate.aspx`, `Smartsearch/Default.aspx`,
+session `(S(...))` URLs, `WSExtendedGrid`, `as1_` controls), so the archived TN
+scraper under `src/_legacy_tn/` is the structural template. See memory:
+[va-public-notice](memory).
+
+### Auth + captcha (the key constraint)
+The public Advanced Search form and results grid render anonymously, but the
+**preview snippet doesn't contain the property address** — the full notice text
+(address, owner/borrower, trustee, sale date) is behind a **FREE VPA "Smart
+Search" account**, and the notice **detail page is reCAPTCHA-gated** (same as the
+TN twin).
+- Sign up free: `https://www.publicnoticevirginia.com/SmartSearchSignup.aspx`
+- Env: `VAPN_EMAIL`, `VAPN_PASSWORD`, and the existing `CAPTCHA_API_KEY` (2Captcha,
+  reused). Detail reCAPTCHA sitekey is detected dynamically (no hardcode).
+
+### Design — one union search per county, classify by CONTENT
+The "Popular Searches" presets only auto-fill the keyword box with a broad
+**OR-term list**, and the terms cross-contaminate (the Estate Claims preset's
+"estate" matches foreclosure "**real estate**" notices) — so a preset does NOT
+reliably imply a notice_type. Instead the puller (verified live 2026-06-03):
+1. Runs **one search per county** — a single focused union keyword
+   (`SEARCH_KEYWORD`, OR match) + one County checkbox + date window. County is
+   unambiguous because we know which checkbox produced the results.
+2. **Classifies each notice from its content** via `classify_notice_type()` —
+   on the cheap grid **preview** (to skip non-targets BEFORE spending a captcha
+   solve) and again on the **full body** (final). Non-target notices (meeting
+   schedules, ABC licenses, etc.) are dropped but their preview-hash is cached.
+3. Full text is **LLM-parsed with VA-specific prompts inside the puller** (NOT
+   the TN-hardcoded `llm_parser.py`, which would inject "TN").
+
+### Notice types (classified from content, 2026-06-02 scope)
+| notice_type | Detected by | Why it matters |
+|---|---|---|
+| `probate` | "estate of", "notice to creditors", "qualified as", PR/executor | Fills the VA court-probate gap (PR/executor named → triggers obituary enricher's "DM = named PR" preset). Sets `owner_deceased="yes"`, `decedent_name`, PR mailing address. |
+| `foreclosure` | "trustee's sale", "deed of trust", "in execution of" | Overlaps PropertyRadar VA lists; dedup downstream by address. |
+| `tax_sale` | "delinquent tax", "tax deed", "§58.1-39…" | Not sourced elsewhere for VA. |
+
+Divorce was dropped (no clean signal, low value). Notice taxonomy unchanged —
+reuses existing `probate`/`foreclosure`/`tax_sale` types + DataSift list maps.
+
+### Target localities (VA buy-box + nearby)
+Exact County-checkbox labels: **Richmond City** (NOT "Richmond", which is the
+rural Richmond County on the Northern Neck), Henrico, Chesterfield, Prince
+William, Hanover, Goochland, Powhatan, Fairfax. Checkboxes render offscreen, so
+they're ticked via JS (`checked` + dispatched events), matched on exact label.
+
+### Throughput note
+Each notice detail requires a 2Captcha reCAPTCHA-v2 solve (~30-90s). Daily
+deltas are small (fine for a cron); a full historical backfill is slow. Balance
+on the 2Captcha account funds it (~$0.003/solve).
+
+### Key Files
+- `src/va_public_notice_puller.py` — `pull_new_records(mode="daily", since=None,
+  headless=True) -> list[NoticeData]` (sync) + `pull_new_records_async(...)`.
+  Login → per-county union search → paginate → preview-classify → detail+captcha
+  → full-text classify → LLM-parse → NoticeData. `classify_notice_type()` is the
+  notice_type source of truth.
+- `src/va_public_notice_config.py` — URLs, selectors (ALL verified live),
+  `SEARCH_KEYWORD`, `TARGET_LOCALITIES`, `TARGET_NOTICE_TYPES`, state paths.
+- `src/captcha_solver.py` — shared, state-agnostic 2Captcha helper (sitekey
+  auto-detected). Promoted from `_legacy_tn/captcha_solver.py` so active code
+  doesn't import from the archive.
+- `va_public_notice_state.json` (PROJECT_ROOT) — `{last_run_date, seen_ids}`.
+  `seen_ids` dedups BEFORE opening a detail, so a notice is never re-captcha'd.
+- Recon scripts (one-off, kept for reference): `test_va_public_notice_recon.py`,
+  `test_va_public_notice_recon2.py`.
+
+### Pipeline integration
+- `notice_type="probate"|"foreclosure"|"tax_sale"`,
+  `source_url="va_public_notice://{notice_id}"`.
+- Enrichment: OPP stays ON (Richmond City records get code-case enrichment;
+  the enricher self-filters non-Richmond). `skip_parcel_lookup=True`. Vacant land
+  kept (operator buy-box).
+- `source_url` scheme disambiguates from PR / Chesterfield ACA / Richmond Vacant feeds.
+
+### Dependencies (already in requirements.txt)
+- `playwright`, `2captcha-python`, `anthropic` (LLM parse) — no new deps.
+
 ## DataSift.ai (REISift) Integration
 
 DataSift.ai (formerly REISift) is the CRM where scraped records land for niche sequential marketing campaigns. There is **no REST API** — upload is via Playwright browser automation of the web UI.
@@ -231,7 +565,7 @@ DataSift.ai (formerly REISift) is the CRM where scraped records land for niche s
 DataSift's niche sequential system uses filter presets to guide records through skip-trace → SMS → Call (3 follow-ups) → Mail → Deep Prospecting phases. Two preset folders: "00. NICHE SEQUENTIAL" (14 presets, courthouse data) and "01. Bulk Sequential Marketing" (9 presets, bulk data). The "00. NICHE SEQUENTIAL" folder is owned by the operator in DataSift's UI and is the source-of-truth for those 14 presets — `src/niche_sequential.py` PRESETS only mirrors SiftStack-added presets (currently just `14. Pre-Probate → DP`). All presets exclude Sold status (build 1.0.23+). Preset 14 (`Pre-Probate → DP`) routes PR-sourced pre_probate records to deep_prospector for heir research before any contact channel fires, since the property owner is dead. A "Sold Property Cleanup" sequence in the Transactions folder auto-fires on "Sold" tag to change status, remove from lists, clear tasks, and clear assignee.
 
 - **"Courthouse Data" tag:** Every record gets this tag — signals first-to-market county data (prioritized over bulk data in filter presets)
-- **Lists column (additive, DSP-01):** Every record carries TWO list memberships, comma-delimited: its per-notice-type list AND the `SiftStack` disposition list. Per-type map: `foreclosure` → `"Foreclosure"`, `probate` → `"Probate"`, `pre_probate` → `"Pre-Probate"`, `tax_sale` → `"Tax Sale"`, `tax_delinquent` → `"Tax Delinquent"`, `eviction` → `"Eviction"`, `code_violation` → `"Code Violation"`, `divorce` → `"Divorce"`. Cell value example: `"Foreclosure,SiftStack"` (CSV-auto-quoted because the value contains the column delimiter `,`). Records without a notice_type still get `SiftStack` so the disposition always lands. Per-type list is FIRST segment, `SiftStack` is SECOND — DataSift auto-creates per-type lists from CSV; `SiftStack` pre-exists in the operator's account. Source-of-truth constants: `SIFTSTACK_LIST_NAME = "SiftStack"`, `LIST_DELIMITER = ","` in `src/datasift_formatter.py`.
+- **Lists column (additive, DSP-01):** Every record carries TWO list memberships, comma-delimited: its per-notice-type list AND the `SiftStack` disposition list. Per-type map: `foreclosure` → `"Foreclosure"`, `probate` → `"Probate"`, `pre_probate` → `"Pre-Probate"`, `tax_sale` → `"Tax Sale"`, `tax_delinquent` → `"Tax Delinquent"`, `eviction` → `"Eviction"`, `code_violation` → `"Code Violation"`, `divorce` → `"Divorce"`, `vacant_building` → `"Vacant Building"`. Cell value example: `"Foreclosure,SiftStack"` (CSV-auto-quoted because the value contains the column delimiter `,`). Records without a notice_type still get `SiftStack` so the disposition always lands. Per-type list is FIRST segment, `SiftStack` is SECOND — DataSift auto-creates per-type lists from CSV; `SiftStack` pre-exists in the operator's account. Source-of-truth constants: `SIFTSTACK_LIST_NAME = "SiftStack"`, `LIST_DELIMITER = ","` in `src/datasift_formatter.py`.
 - **Tags:** Courthouse Data, notice_type, county, YYYY-MM date, deceased/living, DM confidence level, has_auction, tax_delinquent, photo_import (for photo-sourced records)
 
 ### Upload Wizard (6 Steps — DataSift added Enrichment step post-Phase-1)
@@ -387,7 +721,7 @@ These values are identical across all skills that reference them:
 - **Comp adjustments:** Bedroom $5,000, Bathroom $7,500, $/sqft $85, Age $500/yr (from `comp_analyzer.py`)
 - **Financing defaults:** HML 12%, conventional 7%, 2 points, 2.5% closing (from `deal_analyzer.py`)
 - **DOD sanity:** MAX_DOD_GAP_YEARS = 3 (from `obituary_enricher.py`)
-- **Notice types:** 8 total (foreclosure, tax_sale, tax_delinquent, probate, pre_probate, eviction, code_violation, divorce)
+- **Notice types:** 9 total (foreclosure, tax_sale, tax_delinquent, probate, pre_probate, eviction, code_violation, divorce, vacant_building)
 
 ### Key Corrections Made During Optimization (April 2026)
 - **Hardcoded credentials removed** from sift-market-research (had email/password in SKILL.md)

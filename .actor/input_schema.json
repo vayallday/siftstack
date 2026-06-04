@@ -2,29 +2,94 @@
     "title": "SiftStack Input",
     "type": "object",
     "schemaVersion": 1,
-    "required": ["mode", "pr_username", "pr_password"],
+    "required": ["mode"],
     "properties": {
         "mode": {
             "title": "Run Mode",
             "type": "string",
-            "description": "daily / historical = PropertyRadar list pulls (delta vs pr_state.json). PR has no Added-Date filter, so the two modes behave the same — both pull new records since the last successful run.",
+            "description": "daily / historical = PropertyRadar list pulls (requires pr_username + pr_password). chesterfield-code-violation = Chesterfield ACA bulk code violation report (anonymous). richmond-vacant = Richmond Vacant Building List vacancy registry (anonymous). va-public-notice = Virginia Press Association notices (estate/foreclosure/tax-deed); requires vapn_username + vapn_password + captcha_api_key. The chesterfield + richmond modes do NOT need credentials.",
+            "enum": ["daily", "historical", "chesterfield-code-violation", "richmond-vacant", "va-public-notice"],
+            "default": "daily",
+            "editor": "select"
+        },
+        "vapn_username": {
+            "title": "VA Public Notice Email (va-public-notice only)",
+            "type": "string",
+            "description": "Login email for the free Virginia Press Association Smart Search account (publicnoticevirginia.com/SmartSearchSignup.aspx). Required for va-public-notice mode.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "vapn_password": {
+            "title": "VA Public Notice Password (va-public-notice only)",
+            "type": "string",
+            "description": "Login password for the VPA Smart Search account. Required for va-public-notice mode.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "captcha_api_key": {
+            "title": "2Captcha API Key (va-public-notice only)",
+            "type": "string",
+            "description": "2Captcha key for solving the reCAPTCHA v2 on VPA notice detail pages (~$2.99/1000 solves). Required for va-public-notice mode.",
+            "editor": "textfield",
+            "isSecret": true
+        },
+        "va_mode": {
+            "title": "VA Public Notice Pull Mode (va-public-notice only)",
+            "type": "string",
+            "description": "daily = notices since last run (delta). historical = last 12 months. Daily-cadence recommended.",
             "enum": ["daily", "historical"],
             "default": "daily",
             "editor": "select"
         },
+        "va_since": {
+            "title": "VA Public Notice Since-Date Override (va-public-notice only)",
+            "type": "string",
+            "description": "Override the since-date (YYYY-MM-DD). Leave blank to use state (last run date) / 7-day first-run window.",
+            "editor": "textfield",
+            "default": ""
+        },
         "pr_username": {
             "title": "PropertyRadar Email",
             "type": "string",
-            "description": "Login email for app.propertyradar.com (Solo plan).",
+            "description": "Login email for app.propertyradar.com (Solo plan). Required for daily / historical modes only.",
             "editor": "textfield",
             "isSecret": true
         },
         "pr_password": {
             "title": "PropertyRadar Password",
             "type": "string",
-            "description": "Login password for app.propertyradar.com.",
+            "description": "Login password for app.propertyradar.com. Required for daily / historical modes only.",
             "editor": "textfield",
             "isSecret": true
+        },
+        "aca_start": {
+            "title": "ACA Date Window Start (chesterfield-code-violation only)",
+            "type": "string",
+            "description": "Override the start date for the Chesterfield ACA report (YYYY-MM-DD). Leave blank to let the puller decide based on state (yesterday-to-today after first run, 90-day window first time).",
+            "editor": "textfield",
+            "default": ""
+        },
+        "aca_end": {
+            "title": "ACA Date Window End (chesterfield-code-violation only)",
+            "type": "string",
+            "description": "Override the end date for the Chesterfield ACA report (YYYY-MM-DD). Leave blank for today.",
+            "editor": "textfield",
+            "default": ""
+        },
+        "aca_first_pull_days": {
+            "title": "ACA First-Pull Window Size (days)",
+            "type": "integer",
+            "description": "How many days back to fetch on the first-ever ACA pull (no prior state). Default 90.",
+            "default": 90,
+            "minimum": 1,
+            "maximum": 365
+        },
+        "aca_all_violations": {
+            "title": "ACA: include ALL code violations (bypass high-motivation filter)",
+            "type": "boolean",
+            "description": "Default OFF. When OFF, only Chesterfield cases citing a HIGH_MOTIVATION_CODE_SECTIONS pattern (currently 'vacant') are emitted as leads. Filter source-of-truth: src/chesterfield_aca_puller.py. When ON, every code violation case is emitted.",
+            "default": false,
+            "editor": "checkbox"
         },
         "use_residential_proxy": {
             "title": "Use Residential Proxy",

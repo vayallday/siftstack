@@ -144,6 +144,30 @@ async def _apify_run_simple_feed_mode(actor_input: dict, mode: str, pipeline_sta
 
         Actor.log.info("Pulling Richmond Vacant Building List")
         notices = _pull_vacant()
+    elif mode == "va-public-notice":
+        import va_public_notice_config as _vacfg
+        from va_public_notice_puller import pull_new_records as _pull_va
+        state_filename = _vacfg.STATE_FILE.name
+        source_label = "Virginia Public Notice (VPA)"
+        csv_prefix = "va_public_notice"
+
+        if not _vacfg.VAPN_EMAIL or not _vacfg.VAPN_PASSWORD:
+            Actor.log.error("vapn_username and vapn_password are required for va-public-notice")
+            await Actor.fail(status_message="Missing VAPN credentials")
+            return
+        if not _vacfg.CAPTCHA_API_KEY:
+            Actor.log.warning("captcha_api_key not set — detail pages may be unviewable")
+
+        await apify_state.restore_state_file(kvs, state_filename)
+
+        va_mode = actor_input.get("va_mode", "daily")
+        va_since = actor_input.get("va_since") or None
+
+        Actor.log.info("Pulling Virginia public notices (mode=%s)", va_mode)
+        import asyncio as _asyncio
+        notices = await _asyncio.to_thread(
+            _pull_va, mode=va_mode, since=va_since, headless=True,
+        )
     else:
         Actor.log.error("Unknown feed mode: %s", mode)
         await Actor.fail(status_message=f"Unknown feed mode: {mode}")
@@ -169,10 +193,13 @@ async def _apify_run_simple_feed_mode(actor_input: dict, mode: str, pipeline_sta
         skip_parcel_lookup=True,
         # Vacant Building List is by definition vacant — never filter it out.
         # ACA records can include vacant land too; let operator decide.
-        skip_vacant_filter=True if mode == "richmond-vacant" else include_vacant,
+        # Vacant Building List is by definition vacant; VA notices follow the
+        # operator buy-box (include vacant land). ACA lets the operator decide.
+        skip_vacant_filter=True if mode in ("richmond-vacant", "va-public-notice") else include_vacant,
         skip_commercial_filter=include_commercial,
         skip_entity_filter=include_entities,
-        # OPP is Richmond-only — skip on Chesterfield-only batches to avoid log noise.
+        # OPP is Richmond-only. VA notices DO include Richmond City → keep OPP on;
+        # skip on Chesterfield-only batches to avoid log noise.
         skip_opp=(mode == "chesterfield-code-violation"),
         source_label=f"Apify Actor ({source_label})",
     )
@@ -310,6 +337,10 @@ async def actor_main() -> None:
             "TRESTLE_API_KEY": actor_input.get("trestle_api_key", ""),
             "PROPERTYRADAR_EMAIL": actor_input.get("pr_username", ""),
             "PROPERTYRADAR_PASSWORD": actor_input.get("pr_password", ""),
+            # Virginia Public Notice (VPA) — free Smart Search login + 2Captcha
+            "VAPN_EMAIL": actor_input.get("vapn_username", ""),
+            "VAPN_PASSWORD": actor_input.get("vapn_password", ""),
+            "CAPTCHA_API_KEY": actor_input.get("captcha_api_key", ""),
         }
         for key, val in _cred_map.items():
             setattr(config, key, val)
@@ -346,7 +377,7 @@ async def actor_main() -> None:
         # ── Dispatch new bulk-feed modes (chesterfield, vacant) ─────────
         # These modes don't need PropertyRadar creds and have a much simpler
         # flow than daily/historical. Handled separately, then return.
-        if mode in ("chesterfield-code-violation", "richmond-vacant"):
+        if mode in ("chesterfield-code-violation", "richmond-vacant", "va-public-notice"):
             await _apify_run_simple_feed_mode(actor_input, mode, pipeline_start)
             return
 
@@ -967,6 +998,70 @@ def _run_richmond_vacant(args) -> None:
     logging.info("Done — %d records exported", len(notices))
 
 
+def _run_va_public_notice(args) -> None:
+    """Pull Virginia Press Association public notices → diff vs state → enrich → CSV.
+
+    Authenticated scrape of publicnoticevirginia.com (free VPA Smart Search
+    login + 2Captcha on detail). Searches Estate Claims→probate,
+    Foreclosures→foreclosure, Tax Deeds→tax_sale across the VA buy-box
+    localities. See memory: va-public-notice. Estate Claims fills the VA
+    court-probate coverage gap PropertyRadar can't reach.
+    """
+    from datetime import datetime
+    from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline
+    from va_public_notice_puller import pull_new_records
+
+    mode = getattr(args, "va_mode", "daily")
+    since = getattr(args, "va_since", None)
+    headless = not getattr(args, "va_headed", False)
+
+    logger.info("Pulling Virginia public notices (mode=%s)", mode)
+    notices = pull_new_records(mode=mode, since=since, headless=headless)
+
+    if not notices:
+        logging.info("No new Virginia public notice records — exiting")
+        return
+
+    logging.info("VA public notice delta: %d new records", len(notices))
+
+    # OPP stays ON: the enricher self-filters to Richmond City records and
+    # attaches code-case data for any that resolve there. Non-Richmond records
+    # skip the API call internally.
+    opts = PipelineOptions(
+        skip_parcel_lookup=True,        # notice text rarely carries parcel — assessor enrichment handles it
+        skip_smarty=getattr(args, "skip_smarty", False),
+        skip_zillow=getattr(args, "skip_zillow", False),
+        skip_tax=getattr(args, "skip_tax", False),
+        skip_geocode=getattr(args, "skip_geocode", False),
+        skip_obituary=getattr(args, "skip_obituary", False),
+        skip_ancestry=getattr(args, "skip_ancestry", False),
+        skip_entity_research=not getattr(args, "research_entities", False),
+        # ALWAYS skip the vacant-land filter for this source: probate/estate
+        # notices legitimately have NO property address (their value is the named
+        # executor + decedent), and the filter would otherwise drop them as
+        # "no house number". The operator's buy-box also includes vacant land.
+        skip_vacant_filter=True,
+        skip_commercial_filter=getattr(args, "include_commercial", False),
+        skip_entity_filter=getattr(args, "include_entities", False),
+        skip_heir_verification=getattr(args, "skip_heir_verification", False),
+        max_heir_depth=getattr(args, "max_heir_depth", 2),
+        skip_dm_address=getattr(args, "skip_dm_address", False),
+        tracerfy_tier1=getattr(args, "tracerfy_tier1", False),
+        source_label="Virginia Public Notice (VPA)",
+    )
+    notices = run_enrichment_pipeline(notices, opts)
+
+    if not notices:
+        logging.warning("No VA public notice records remaining after pipeline")
+        return
+
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    filename = f"va_public_notice_{timestamp}.csv"
+    path = write_csv(notices, filename=filename)
+    logging.info("Output: %s", path)
+    logging.info("Done — %d records exported", len(notices))
+
+
 def _run_photo_import(args) -> None:
     """Run the photo import pipeline: preprocess → OCR → parse → enrich → CSV."""
     from photo_importer import process_photos
@@ -1324,7 +1419,7 @@ def cli_main() -> None:
         choices=[
             "daily", "historical", "pdf-import", "photo-import", "dropbox-watch",
             "csv-import", "phone-validate", "manage-sold", "manage-presets",
-            "richmond-vacant", "chesterfield-code-violation",
+            "richmond-vacant", "chesterfield-code-violation", "va-public-notice",
             # New analysis & workflow modes
             "comp", "rehab", "analyze-deal", "market-analysis", "buyer-prospect",
             "deep-prospect", "lead-manage", "setup-sequences", "niche-sequential",
@@ -1336,6 +1431,7 @@ def cli_main() -> None:
             "phone-validate = Trestle scoring; manage-sold/manage-presets = DataSift ops; "
             "richmond-vacant = pull Richmond Vacant Building List side feed; "
             "chesterfield-code-violation = pull Chesterfield ACA bulk code violation report; "
+            "va-public-notice = pull Virginia Press Association notices (estate/foreclosure/tax-deed); "
             "comp = comparable sales ARV; rehab = rehab cost estimate; "
             "analyze-deal = full deal analysis; market-analysis = zip code scoring; "
             "buyer-prospect = cash buyer lists; deep-prospect = 4-level research; "
@@ -1470,6 +1566,28 @@ def cli_main() -> None:
             "Bypass the HIGH_MOTIVATION_CODE_SECTIONS filter (default = vacant only) "
             "and emit every Chesterfield code violation case"
         ),
+    )
+    # Virginia Public Notice (VPA) args
+    parser.add_argument(
+        "--va-mode",
+        type=str,
+        default="daily",
+        choices=["daily", "historical"],
+        dest="va_mode",
+        help="VA public notice pull mode: daily (since last run) or historical (last 12 months)",
+    )
+    parser.add_argument(
+        "--va-since",
+        type=str,
+        default=None,
+        dest="va_since",
+        help="Override since-date YYYY-MM-DD (va-public-notice mode)",
+    )
+    parser.add_argument(
+        "--va-headed",
+        action="store_true",
+        dest="va_headed",
+        help="Run VA public notice puller with visible browser (default: headless)",
     )
     # Dropbox watcher arguments
     parser.add_argument(
@@ -2009,6 +2127,10 @@ def cli_main() -> None:
         return
 
     # Chesterfield ACA bulk Code Violation report
+    if args.mode == "va-public-notice":
+        _run_va_public_notice(args)
+        return
+
     if args.mode == "chesterfield-code-violation":
         _run_chesterfield_aca(args)
         return

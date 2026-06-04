@@ -37,10 +37,12 @@ class NoticeData:
     owner_name: str = ""
     notice_type: str = ""      # foreclosure | tax_sale | tax_delinquent |
                                # probate | pre_probate | eviction |
-                               # code_violation | divorce
-                               # (8 total — pre_probate is PropertyRadar-only,
+                               # code_violation | divorce | vacant_building
+                               # (9 total — pre_probate is PropertyRadar-only,
                                # property-records deceased signal with no
-                               # court filing; see CLAUDE.md)
+                               # court filing; vacant_building is Richmond's
+                               # bi-annual Vacant Building List registry — a
+                               # vacancy signal, NOT a code violation; see CLAUDE.md)
     county: str = ""
     source_url: str = ""
     raw_text: str = ""         # Full notice text for classification
@@ -143,6 +145,16 @@ class NoticeData:
     pr_lifecycle: str = ""             # "exited" | "reentered" | "" (empty for normal records)
     pr_list_slug: str = ""             # Slug of the PR list that triggered the lifecycle event
     pr_lifecycle_date: str = ""        # YYYY-MM-DD when the event was detected
+    # Richmond OPP / EnerGov enrichment (Richmond City only — see
+    # src/richmond_opp_enricher.py). Empty for non-Richmond records.
+    opp_checked: str = ""                       # "yes" | "skip_bad_address" | "http_error" | "network_error" | ""
+    opp_active_violation_count: str = ""        # count of code cases currently In Violation
+    opp_total_code_case_count: str = ""         # count of all code cases (active + closed)
+    opp_recent_permit_count: str = ""           # permits ApplyDate within last 2 years
+    opp_active_violation_cases: str = ""        # pipe-separated case numbers (top 5)
+    opp_latest_violation_status: str = ""       # status of most-recent active violation
+    opp_latest_violation_date: str = ""         # YYYY-MM-DD of most-recent active violation
+    opp_parcel_id: str = ""                     # MainParcel from OPP (Richmond assessor parcel ID)
 
 
 # ── Known TN cities in Knox & Blount counties ─────────────────────────

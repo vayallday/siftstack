@@ -16,6 +16,10 @@ pr_quota.json
 datasift_cookies.json
 dropbox_state.json
 photo_state.json
+chesterfield_aca_state.json
+richmond_vacant_state.json
+va_public_notice_state.json
+va_public_notice_cookies.json
 *.tmp
 *.bak
 

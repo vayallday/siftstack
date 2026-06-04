@@ -50,6 +50,11 @@ class PipelineOptions:
     skip_dm_address: bool = False
     tracerfy_tier1: bool = False
 
+    # Richmond OPP / EnerGov per-address code-case enrichment.
+    # Default: ON for any pipeline that touches Richmond City records.
+    # Skipped automatically if no Richmond records present in the batch.
+    skip_opp: bool = False
+
     # Smart detection flags (set by detect_existing_enrichment)
     has_smarty: bool = False
     has_zillow: bool = False
@@ -212,20 +217,27 @@ def _validate_records(notices: list[NoticeData]) -> list[NoticeData]:
 
     for n in notices:
         issues = []
+        nt = (n.notice_type or "").lower()
 
-        # Required fields
-        if not n.address.strip():
-            issues.append("missing address")
-        elif _GARBAGE_RE.match(n.address):
-            issues.append(f"garbage address: {n.address!r}")
+        if nt in ("probate", "pre_probate"):
+            # Probate/estate notices carry NO property address by nature — the
+            # contact is the named executor/PR (+ mailing address) or the
+            # decedent. Validate on the person fields instead of a property
+            # address; otherwise every probate record is silently dropped here.
+            if not (n.owner_name.strip() or n.decedent_name.strip()):
+                issues.append("probate: no owner_name/executor or decedent_name")
+        else:
+            # Property-address records (foreclosure, tax_sale, code_violation, …)
+            if not n.address.strip():
+                issues.append("missing address")
+            elif _GARBAGE_RE.match(n.address):
+                issues.append(f"garbage address: {n.address!r}")
+            if not n.city.strip():
+                issues.append("missing city")
+            if not n.zip.strip():
+                issues.append("missing zip")
 
-        if not n.city.strip():
-            issues.append("missing city")
-
-        if not n.zip.strip():
-            issues.append("missing zip")
-
-        # Date format validation (only if populated)
+        # Date format validation (only if populated) — applies to all types.
         for date_field in ("date_added", "auction_date"):
             val = getattr(n, date_field, "")
             if val and not _DATE_RE.match(val):
@@ -422,6 +434,21 @@ def run_enrichment_pipeline(
             else "Smarty skipped/preserved"
         )
         logger.info("── Step 7: Reverse Geocode (%s) ──", skip_reason)
+
+    # ── Step 7b: Richmond OPP / EnerGov Code-Case Enrichment ─────────
+    # Per-address lookup against Richmond's Tyler EnerGov Self-Service API.
+    # Skipped automatically if no Richmond City records are in the batch.
+    if not opts.skip_opp:
+        logger.info("── Step 7b: Richmond OPP Code-Case Enrichment ──")
+        try:
+            from richmond_opp_enricher import enrich_notices as _opp_enrich
+            _opp_enrich(notices)
+        except ImportError:
+            logger.warning("  richmond_opp_enricher not available — skipping")
+        except Exception as e:
+            logger.warning("  OPP enrichment failed: %s", e)
+    else:
+        logger.info("── Step 7b: Richmond OPP (skipped) ──")
 
     # ── Step 8: Zillow Property Enrichment ───────────────────────────
     if not opts.skip_zillow and not opts.has_zillow:
