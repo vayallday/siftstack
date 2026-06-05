@@ -164,6 +164,41 @@ JS_PR_TICK_USER_AGREEMENT = (
     "Ext.ComponentQuery.query('[name=userAgreement]')[0].setValue(true)"
 )
 
+# Uncheck the PAID "Phone Append" / "Email Append" add-ons on the Complete-Export
+# confirmation. PR defaults them ON; they cost money and — with a near-zero
+# account balance — push the purchase cost over the balance, so PR blocks the
+# Purchase with the "Add to balance or select credit card…" modal (which hangs
+# the Purchase click and cascades into the NEXT list's nav timeout). SiftStack
+# skip-traces via DataSift/Tracerfy, so PR's append is pure waste — turn it OFF
+# so every export is records-only (free under the 10K/mo quota). Uses the ExtJS
+# component model (setValue) like the User-Agreement tick above — the native
+# inputs are visually hidden so a Playwright click is unreliable. Returns the
+# list of labels it actually unchecked (for logging). Deliberately does NOT touch
+# "Has mobile" (a record filter, not a paid append — unchecking it would change
+# the export's row count).
+JS_PR_UNCHECK_EXPORT_APPENDS = """
+(() => {
+    const want = ['Phone Append', 'Email Append'];
+    const seen = new Set();
+    const cbs = [].concat(
+        Ext.ComponentQuery.query('checkbox'),
+        Ext.ComponentQuery.query('checkboxfield'),
+        Ext.ComponentQuery.query('[boxLabel]')
+    );
+    const out = [];
+    for (const cb of cbs) {
+        if (!cb || seen.has(cb.id)) continue;
+        seen.add(cb.id);
+        const bl = ((cb.boxLabel || cb.fieldLabel || '') + '').trim();
+        if (want.indexOf(bl) !== -1 && cb.getValue && cb.setValue && cb.getValue()) {
+            cb.setValue(false);
+            out.push(bl);
+        }
+    }
+    return out;
+})()
+"""
+
 JS_PR_GRID_STORE_RADARIDS = """
 (() => {
     const grids = Ext.ComponentQuery.query('grid');

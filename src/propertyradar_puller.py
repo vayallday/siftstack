@@ -35,6 +35,7 @@ from propertyradar_config import (
     JS_PR_GRID_STORE_LOADED_CHECK,
     JS_PR_GRID_STORE_RECORDS,
     JS_PR_TICK_USER_AGREEMENT,
+    JS_PR_UNCHECK_EXPORT_APPENDS,
     LIFECYCLE_ACTIVE,
     LIFECYCLE_EXITED,
     LIFECYCLE_REENTERED,
@@ -788,6 +789,24 @@ async def _export_delta(
     await asyncio.sleep(3)
     await _dismiss_pr_popups(page)
 
+    # ── Turn OFF the paid Phone/Email Append add-ons (2026-06-05) ───────
+    # The Complete-Export confirmation defaults Phone Append + Email Append ON.
+    # They're PAID — with a near-zero PR balance they push the cost over the
+    # balance and PR blocks Purchase with the "Add to balance…" modal (which
+    # hung the Purchase click and cascaded into the next list's nav timeout —
+    # this is why VA_Pre-Probate kept failing). We skip-trace downstream, so
+    # PR's append is waste; turning it off makes the export records-only (free).
+    try:
+        unchecked = await page.evaluate(JS_PR_UNCHECK_EXPORT_APPENDS)
+        if unchecked:
+            logger.info("Disabled paid export add-ons for %s: %s",
+                        pr_list.name, ", ".join(unchecked))
+        await asyncio.sleep(0.7)  # let ExtJS recompute the cost total
+    except Exception:
+        logger.warning("Could not uncheck export appends for %s — "
+                       "purchase may hit the balance modal", pr_list.name,
+                       exc_info=True)
+
     # ── Wizard page 2: confirm purchase ────────────────────────────────
     # Purchase opens the Download modal; quota is NOT consumed yet (it's
     # consumed on the modal's Download click).
@@ -796,17 +815,23 @@ async def _export_delta(
     await page.click(SEL_PR_EXPORT_PURCHASE)
     await asyncio.sleep(3)
 
-    # ── Balance-insufficient detector (2026-05-26) ─────────────────────
-    # After Purchase, PR may show "Complete Export" with the text
-    # "Available balance is insufficient to complete this purchase" + the
-    # current $X.XX balance + an "Add to Balance" CTA. The modal blocks ALL
+    # ── Balance-insufficient detector (2026-05-26; widened 2026-06-05) ──
+    # After Purchase, PR may show "Complete Export" with a balance-block warning
+    # + the current $X.XX balance + an "Add to Balance" CTA. The modal blocks ALL
     # navigation — if we leave it open, the next list-nav click times out.
-    # Fail fast so the caller skips remaining lists wholesale.
+    # Fail fast so the caller skips remaining lists wholesale. PR has shown two
+    # wordings; match both (the second was missed pre-2026-06-05, so the click
+    # hung 60s and cascaded into the next list's nav timeout).
+    _BALANCE_BLOCK_MARKERS = (
+        "Available balance is insufficient",
+        "Add to balance or select credit card",
+        "select credit card to complete this purchase",
+    )
     try:
         body_text = (await page.locator("body").inner_text(timeout=2000)) or ""
     except Exception:
         body_text = ""
-    if "Available balance is insufficient" in body_text:
+    if any(m in body_text for m in _BALANCE_BLOCK_MARKERS):
         await _capture_list_nav_diagnostic(page, pr_list.name, "insufficient_balance")
         raise InsufficientBalanceError(
             f"PR export of '{pr_list.name}' blocked by insufficient-balance modal. "
