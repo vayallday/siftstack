@@ -266,12 +266,44 @@ async def _upload_login_diagnostic(page, tag: str) -> None:
 # ── UI Primitives ─────────────────────────────────────────────────────
 
 async def screenshot(page, name: str) -> None:
-    """Take a debug screenshot (saved to working directory)."""
+    """Take a debug screenshot.
+
+    Local: saves to the working directory as `datasift_{name}.png`.
+
+    Apify: ALSO uploads to the run's default KVS as
+    `datasift_screenshot_{name}_{YYYYMMDD_HHMMSS}.png` so post-mortem
+    debugging is possible after the container is destroyed. Without this,
+    every Playwright bug (wizard column-mapping landing on wrong elements,
+    login form changes, etc.) had to be guessed at since no diagnostic
+    artifact survived the run.
+
+    Failures here are NEVER fatal — diagnostic capture must not break the
+    main upload flow.
+    """
+    import os as _os
+    local_path = f"datasift_{name}.png"
     try:
-        await page.screenshot(path=f"datasift_{name}.png")
-        logger.debug("Screenshot: datasift_%s.png", name)
+        await page.screenshot(path=local_path)
+        logger.debug("Screenshot: %s", local_path)
     except Exception as e:
         logger.debug("Screenshot failed (%s): %s", name, e)
+        return
+
+    # On Apify, push to KVS too so we get post-mortem artifacts.
+    if not (_os.environ.get("APIFY_IS_AT_HOME") or _os.environ.get("APIFY_TOKEN")):
+        return
+    try:
+        from datetime import datetime as _dt
+        from apify import Actor
+        stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+        key = f"datasift_screenshot_{name}_{stamp}"
+        kvs = await Actor.open_key_value_store()
+        with open(local_path, "rb") as f:
+            await kvs.set_value(key, f.read(), content_type="image/png")
+        logger.debug("Screenshot uploaded to KVS as %s", key)
+    except Exception as e:
+        # Don't even log at warning — diagnostic save is best-effort.
+        logger.debug("Screenshot KVS upload failed (%s): %s", name, e)
 
 
 async def dismiss_popups(page) -> None:
