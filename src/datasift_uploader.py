@@ -423,59 +423,148 @@ async def upload_csv(
     await page.wait_for_timeout(3000)
     await _screenshot(page, "step4_column_mapping")
 
-    # Try to drag unmapped columns (left side) to their targets (right side)
-    # DataSift uses styled-components with draggable="false" — need slow mouse drag
-    async def _drag_column(source_el, target_el):
-        """Drag a CSV column card to a mapping target using slow mouse moves."""
-        src_box = await source_el.bounding_box()
-        dst_box = await target_el.bounding_box()
-        if not src_box or not dst_box:
-            return False
-        sx = src_box["x"] + src_box["width"] / 2
-        sy = src_box["y"] + src_box["height"] / 2
-        dx = dst_box["x"] + dst_box["width"] / 2
-        dy = dst_box["y"] + dst_box["height"] / 2
-        await page.mouse.move(sx, sy)
-        await page.wait_for_timeout(500)
-        await page.mouse.down()
-        await page.wait_for_timeout(500)
-        steps = 20
-        for i in range(1, steps + 1):
-            frac = i / steps
-            await page.mouse.move(
-                sx + (dx - sx) * frac,
-                sy + (dy - sy) * frac,
-            )
-            await page.wait_for_timeout(50)
-        await page.wait_for_timeout(500)
-        await page.mouse.up()
-        await page.wait_for_timeout(1000)
-        return True
+    # DataSift's column mapper is a POINTER-based DnD (cards are
+    # draggable="false", so HTML5 drag events do nothing — only synthesized
+    # mouse events work). Left panel = unmapped CSV source columns; right
+    # panel = DataSift target fields. Mapping a column moves its source card
+    # OFF the left list into the matching right target, so "source heading no
+    # longer present on the left" is our reliable success signal.
+    #
+    # Region split (1280-wide context): left cards ~x328-720, right targets
+    # ~x785-1215 → a 745px divider cleanly separates the two panels.
+    _DIVIDER = 745
 
-    # Map Tags column: find "Tags" card on left, drag to "Tags" target on right
+    async def _panel_box(name, side):
+        """Center {x,y,w,h} of the smallest card whose first text line == name,
+        on the given side ('left'|'right'). None if not found."""
+        return await page.evaluate(
+            """([name, side, div]) => {
+                const want = name.trim().toLowerCase();
+                const inRegion = (r) => side === 'left'
+                    ? (r.left > 180 && r.left < div) : (r.left >= div);
+                let best = null;
+                for (const el of document.querySelectorAll('div')) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 60 || r.width > 540 || r.height < 22 || r.height > 180) continue;
+                    if (!inRegion(r)) continue;
+                    const first = ((el.innerText || '').split('\\n')[0] || '').trim().toLowerCase();
+                    if (first === want && (!best || r.height < best.h))
+                        best = {x: r.left + r.width / 2, y: r.top + r.height / 2,
+                                w: r.width, h: r.height};
+                }
+                return best;
+            }""",
+            [name, side, _DIVIDER],
+        )
+
+    async def _scroll_right_into_view(name):
+        """Scroll the right (target) panel so a target card headed `name` shows."""
+        return await page.evaluate(
+            """([name, div]) => {
+                const want = name.trim().toLowerCase();
+                for (const el of document.querySelectorAll('div')) {
+                    const r = el.getBoundingClientRect();
+                    if (r.left < div || r.width < 60 || r.width > 540) continue;
+                    const first = ((el.innerText || '').split('\\n')[0] || '').trim().toLowerCase();
+                    if (first === want) { el.scrollIntoView({block: 'center'}); return true; }
+                }
+                return false;
+            }""",
+            [name, _DIVIDER],
+        )
+
+    async def _left_headings():
+        """Headings of source columns still sitting unmapped in the left panel."""
+        return await page.evaluate(
+            """(div) => {
+                const out = new Set();
+                for (const el of document.querySelectorAll('div')) {
+                    const r = el.getBoundingClientRect();
+                    if (r.left < 180 || r.left >= div || r.width < 60 || r.width > 540) continue;
+                    if (r.height < 22 || r.height > 180) continue;
+                    const first = ((el.innerText || '').split('\\n')[0] || '').trim();
+                    if (first) out.add(first);
+                }
+                return [...out];
+            }""",
+            _DIVIDER,
+        )
+
+    async def _drag(src, dst):
+        """Pointer-drag src→dst with a drag-activation jiggle and a hover-settle
+        on the target so the drop zone registers."""
+        sx, sy, dx, dy = src["x"], src["y"], dst["x"], dst["y"]
+        await page.mouse.move(sx, sy)
+        await page.wait_for_timeout(300)
+        await page.mouse.down()
+        await page.wait_for_timeout(250)
+        await page.mouse.move(sx + 6, sy + 6)  # cross drag threshold
+        await page.wait_for_timeout(150)
+        steps = 25
+        for i in range(1, steps + 1):
+            f = i / steps
+            await page.mouse.move(sx + (dx - sx) * f, sy + (dy - sy) * f)
+            await page.wait_for_timeout(40)
+        await page.mouse.move(dx, dy)  # settle on target
+        await page.wait_for_timeout(250)
+        await page.mouse.move(dx + 2, dy + 2)
+        await page.wait_for_timeout(250)
+        await page.mouse.up()
+        await page.wait_for_timeout(1200)
+
+    # Diagnostic dump of both panels — lets us refine selectors offline if a
+    # live drag fails (e.g. DataSift renames a target field).
+    try:
+        import json as _json
+        cards = await page.evaluate(
+            """(div) => {
+                const out = [];
+                for (const el of document.querySelectorAll('div')) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 60 || r.width > 540 || r.height < 22 || r.height > 180) continue;
+                    const first = ((el.innerText || '').split('\\n')[0] || '').trim();
+                    if (!first) continue;
+                    out.push({side: r.left >= div ? 'right' : 'left',
+                              heading: first.slice(0, 40),
+                              x: Math.round(r.left), y: Math.round(r.top)});
+                }
+                return out;
+            }""",
+            _DIVIDER,
+        )
+        Path("output").mkdir(exist_ok=True)
+        Path("output/mapping_dom.json").write_text(_json.dumps(cards, indent=2))
+        logger.info("Dumped %d mapping cards -> output/mapping_dom.json", len(cards))
+    except Exception as e:
+        logger.debug("Mapping DOM dump failed: %s", e)
+
     for col_name in ["Tags", "Lists"]:
-        try:
-            # Source: unmapped column card on the left (contains column name + sample data)
-            source = page.locator(f'div:has-text("{col_name}") >> visible=true').first
-            # Target: mapping slot on the right side (search for it)
-            # Right-side targets have the field name — search within right panel area
-            target = page.locator(f'text="{col_name}"').last
-            if await source.count() > 0 and await target.count() > 0:
-                src_box = await source.bounding_box()
-                tgt_box = await target.bounding_box()
-                # Ensure source is on left (<600px) and target is on right (>600px)
-                if src_box and tgt_box and src_box["x"] < 600 and tgt_box["x"] > 600:
-                    if await _drag_column(source, target):
-                        logger.info("Mapped column: %s", col_name)
-                        await page.wait_for_timeout(1000)
-                    else:
-                        logger.warning("Drag failed for column: %s", col_name)
-                else:
-                    logger.debug("Column %s: no valid source/target positions", col_name)
-            else:
-                logger.debug("Column %s: source or target not found", col_name)
-        except Exception as e:
-            logger.warning("Column mapping %s failed: %s", col_name, e)
+        mapped = False
+        for attempt in range(1, 4):
+            try:
+                await _scroll_right_into_view(col_name)
+                await page.wait_for_timeout(300)
+                src = await _panel_box(col_name, "left")
+                dst = await _panel_box(col_name, "right")
+                if not src or not dst:
+                    logger.warning(
+                        "Map %s attempt %d: source=%s target=%s (not found)",
+                        col_name, attempt, bool(src), bool(dst),
+                    )
+                    await page.wait_for_timeout(500)
+                    continue
+                await _drag(src, dst)
+                left_now = [h.lower() for h in await _left_headings()]
+                if col_name.lower() not in left_now:
+                    logger.info("Mapped column: %s (attempt %d)", col_name, attempt)
+                    mapped = True
+                    break
+                logger.warning("Map %s attempt %d: still on left, retrying", col_name, attempt)
+            except Exception as e:
+                logger.warning("Map %s attempt %d error: %s", col_name, attempt, e)
+            await page.wait_for_timeout(600)
+        if not mapped:
+            logger.error("Column %s could NOT be mapped after 3 attempts", col_name)
 
     await _screenshot(page, "step4_after_mapping")
 
