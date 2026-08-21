@@ -1,9 +1,9 @@
-"""Tests for detect_deceased_indicator() in tax_enricher.py.
+"""Tests for notice_parser.detect_deceased_indicator().
 
-tax_enricher.py was archived to src/_legacy_tn/ when the TN public-notice
-data pull was retired (the function is Knox-tax-API-coupled). This test is
-preserved here for the helper's regex-only logic, which works on any
-owner-name string. Re-enabled via the _legacy_tn package on sys.path.
+The helper was promoted out of the archived TN tax enricher into
+notice_parser.py when that archive was removed — the logic is pure
+owner-name regex and applies to any source (PropertyRadar owner-of-record
+names carry the same LIFE EST / PERSONAL REP / ET AL markers).
 """
 
 import os
@@ -12,7 +12,7 @@ import sys
 _SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 sys.path.insert(0, _SRC)
 
-from _legacy_tn.tax_enricher import detect_deceased_indicator
+from notice_parser import detect_deceased_indicator
 
 
 def test_personal_rep():

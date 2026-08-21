@@ -16,17 +16,6 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 
-# ── dropbox_watcher.VALID_NOTICE_TYPES ─────────────────────────────
-
-def test_dropbox_valid_notice_types_includes_pre_probate():
-    from dropbox_watcher import VALID_NOTICE_TYPES
-    assert "pre_probate" in VALID_NOTICE_TYPES, (
-        "dropbox_watcher.VALID_NOTICE_TYPES must include pre_probate so a "
-        "/County/pre_probate/photo.jpg folder path resolves rather than "
-        "rejecting the photo at intake."
-    )
-
-
 # ── llm_parser.auto_detect_notice_type validation ──────────────────
 
 def test_llm_parser_valid_types_includes_pre_probate():

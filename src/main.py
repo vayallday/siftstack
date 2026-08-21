@@ -31,16 +31,15 @@ def _preflight_check(mode: str) -> list[str]:
 
     Returns a list of failure descriptions. Empty list = all checks passed.
 
-    The daily/historical acquisition path is always PropertyRadar now —
-    the TN public-notice scraper was archived to ``src/_legacy_tn/``.
+    The daily/historical acquisition path is always PropertyRadar.
     """
     failures: list[str] = []
 
     # ── Credential checks (mode-dependent) ──────────────────────────
     scrape_modes = {"daily", "historical"}
     enrichment_modes = scrape_modes | {
-        "pdf-import", "photo-import", "dropbox-watch", "csv-import",
-        "richmond-vacant", "chesterfield-code-violation",
+        "csv-import", "richmond-vacant", "chesterfield-code-violation",
+        "va-public-notice",
     }
     datasift_modes = {"manage-presets", "manage-sold", "phone-validate"}
 
@@ -66,10 +65,6 @@ def _preflight_check(mode: str) -> list[str]:
     if mode in datasift_modes:
         if not config.DATASIFT_EMAIL or not config.DATASIFT_PASSWORD:
             failures.append("DATASIFT_EMAIL / DATASIFT_PASSWORD not set (required for DataSift operations)")
-
-    if mode == "dropbox-watch":
-        if not config.DROPBOX_APP_KEY or not config.DROPBOX_APP_SECRET or not config.DROPBOX_REFRESH_TOKEN:
-            failures.append("DROPBOX credentials incomplete (need APP_KEY, APP_SECRET, REFRESH_TOKEN)")
 
     if mode == "phone-validate":
         if not config.TRESTLE_API_KEY:
@@ -811,74 +806,6 @@ def setup_logging(verbose: bool = False) -> None:
     logging.info("Logging to %s", log_file)
 
 
-def _run_pdf_import(args) -> None:
-    """Run the PDF import pipeline: OCR → parse → enrich → CSV."""
-    from pdf_importer import process_pdf
-    from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline
-
-    # Validate required args
-    if not args.pdf_path:
-        logging.error("--pdf-path is required for pdf-import mode")
-        sys.exit(1)
-    if not args.pdf_county:
-        logging.error("--pdf-county is required for pdf-import mode")
-        sys.exit(1)
-
-    pdf_path = Path(args.pdf_path)
-    if not pdf_path.exists():
-        logging.error("PDF file not found: %s", pdf_path)
-        sys.exit(1)
-
-    county = args.pdf_county.strip().title()
-
-    api_key = config.ANTHROPIC_API_KEY or None
-
-    # OCR + parse
-    notices = process_pdf(
-        pdf_path=pdf_path,
-        county=county,
-        api_key=api_key,
-        date_added=args.pdf_date,
-        regex_only=args.regex_only,
-    )
-
-    if not notices:
-        logging.warning("No records extracted from PDF")
-        sys.exit(0)
-
-    # Run unified enrichment pipeline
-    opts = PipelineOptions(
-        skip_parcel_lookup=args.skip_tax,
-        skip_smarty=args.skip_smarty,
-        skip_zillow=args.skip_zillow,
-        skip_tax=args.skip_tax,
-        skip_geocode=getattr(args, "skip_geocode", False),
-        skip_obituary=args.skip_obituary,
-        skip_ancestry=getattr(args, "skip_ancestry", False),
-        skip_entity_research=not getattr(args, "research_entities", False),
-        skip_vacant_filter=getattr(args, "include_vacant", False),
-        skip_commercial_filter=getattr(args, "include_commercial", False),
-        skip_entity_filter=getattr(args, "include_entities", False),
-        skip_heir_verification=args.skip_heir_verification,
-        max_heir_depth=args.max_heir_depth,
-        skip_dm_address=args.skip_dm_address,
-        tracerfy_tier1=getattr(args, "tracerfy_tier1", False),
-        source_label=f"PDF import ({pdf_path.name})",
-    )
-    notices = run_enrichment_pipeline(notices, opts)
-
-    if not notices:
-        logging.warning("No records remaining after pipeline")
-        return
-
-    # Write output
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    filename = f"{county.lower()}_tax_sale_{timestamp}.csv"
-    path = write_csv(notices, filename=filename)
-    logging.info("Output: %s", path)
-    logging.info("Done — %d records exported", len(notices))
-
-
 def _run_chesterfield_aca(args) -> None:
     """Pull Chesterfield ACA Code Violation report → diff vs state → enrich → CSV.
 
@@ -1057,82 +984,6 @@ def _run_va_public_notice(args) -> None:
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     filename = f"va_public_notice_{timestamp}.csv"
-    path = write_csv(notices, filename=filename)
-    logging.info("Output: %s", path)
-    logging.info("Done — %d records exported", len(notices))
-
-
-def _run_photo_import(args) -> None:
-    """Run the photo import pipeline: preprocess → OCR → parse → enrich → CSV."""
-    from photo_importer import process_photos
-    from enrichment_pipeline import PipelineOptions, run_enrichment_pipeline
-
-    # Validate required args
-    if not args.folder:
-        logging.error("--folder is required for photo-import mode")
-        sys.exit(1)
-    if not args.photo_county:
-        logging.error("--photo-county is required for photo-import mode")
-        sys.exit(1)
-    if not args.photo_type:
-        logging.error("--photo-type is required for photo-import mode")
-        sys.exit(1)
-
-    folder = Path(args.folder)
-    if not folder.exists() or not folder.is_dir():
-        logging.error("Folder not found: %s", folder)
-        sys.exit(1)
-
-    county = args.photo_county.strip().title()
-
-    notice_type = args.photo_type.strip().lower()
-    api_key = config.ANTHROPIC_API_KEY or None
-
-    # OCR + parse
-    notices = process_photos(
-        folder=folder,
-        county=county,
-        notice_type=notice_type,
-        date_added=args.photo_date,
-        api_key=api_key,
-        correct_perspective=not getattr(args, "no_perspective_correct", False),
-    )
-
-    if not notices:
-        logging.warning("No records extracted from photos")
-        sys.exit(0)
-
-    # Run unified enrichment pipeline
-    # Skip vacant land filter for notice types without property addresses
-    # (probate from court terminals never has property address — would filter everything)
-    no_address_types = {"probate", "divorce"}
-    opts = PipelineOptions(
-        skip_vacant_filter=getattr(args, "include_vacant", False) or notice_type in no_address_types,
-        skip_commercial_filter=getattr(args, "include_commercial", False),
-        skip_entity_filter=getattr(args, "include_entities", False),
-        skip_parcel_lookup=args.skip_tax,
-        skip_smarty=args.skip_smarty,
-        skip_zillow=args.skip_zillow,
-        skip_tax=args.skip_tax,
-        skip_geocode=getattr(args, "skip_geocode", False),
-        skip_obituary=args.skip_obituary,
-        skip_ancestry=getattr(args, "skip_ancestry", False),
-        skip_entity_research=not getattr(args, "research_entities", False),
-        skip_heir_verification=args.skip_heir_verification,
-        max_heir_depth=args.max_heir_depth,
-        skip_dm_address=args.skip_dm_address,
-        tracerfy_tier1=getattr(args, "tracerfy_tier1", False),
-        source_label=f"Photo import ({folder.name})",
-    )
-    notices = run_enrichment_pipeline(notices, opts)
-
-    if not notices:
-        logging.warning("No records remaining after pipeline")
-        return
-
-    # Write output
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    filename = f"{county.lower()}_{notice_type}_{timestamp}.csv"
     path = write_csv(notices, filename=filename)
     logging.info("Output: %s", path)
     logging.info("Done — %d records exported", len(notices))
@@ -1417,17 +1268,16 @@ def cli_main() -> None:
     parser.add_argument(
         "mode",
         choices=[
-            "daily", "historical", "pdf-import", "photo-import", "dropbox-watch",
+            "daily", "historical",
             "csv-import", "phone-validate", "manage-sold", "manage-presets",
             "richmond-vacant", "chesterfield-code-violation", "va-public-notice",
-            # New analysis & workflow modes
+            # Analysis & workflow modes (manual tools, off the daily cron)
             "comp", "rehab", "analyze-deal", "market-analysis", "buyer-prospect",
             "deep-prospect", "lead-manage", "setup-sequences", "niche-sequential",
             "playbook",
         ],
         help=(
-            "daily/historical = scrape notices; pdf-import/photo-import = import from files; "
-            "dropbox-watch = poll Dropbox; csv-import = re-enrich CSV; "
+            "daily/historical = pull PropertyRadar lists; csv-import = re-enrich CSV; "
             "phone-validate = Trestle scoring; manage-sold/manage-presets = DataSift ops; "
             "richmond-vacant = pull Richmond Vacant Building List side feed; "
             "chesterfield-code-violation = pull Chesterfield ACA bulk code violation report; "
@@ -1472,63 +1322,6 @@ def cli_main() -> None:
         "--verbose", "-v",
         action="store_true",
         help="Enable debug logging",
-    )
-    # PDF import arguments
-    parser.add_argument(
-        "--pdf-path",
-        type=str,
-        default=None,
-        help="Path to scanned tax sale PDF (required for pdf-import mode)",
-    )
-    parser.add_argument(
-        "--pdf-county",
-        type=str,
-        default=None,
-        help='County name for PDF import, e.g. "Henrico" (required for pdf-import mode)',
-    )
-    parser.add_argument(
-        "--pdf-date",
-        type=str,
-        default=None,
-        help="Date for PDF records (YYYY-MM-DD). Defaults to today.",
-    )
-    parser.add_argument(
-        "--regex-only",
-        action="store_true",
-        help="Skip LLM parsing and use regex only (pdf-import mode)",
-    )
-    # Photo import arguments
-    parser.add_argument(
-        "--folder",
-        type=str,
-        default=None,
-        help="Path to folder of phone photos (required for photo-import mode)",
-    )
-    parser.add_argument(
-        "--photo-county",
-        type=str,
-        default=None,
-        dest="photo_county",
-        help='County name for photo import, e.g. "Henrico" (required for photo-import mode)',
-    )
-    parser.add_argument(
-        "--photo-type",
-        type=str,
-        default=None,
-        dest="photo_type",
-        help='Notice type for photo import, e.g. "eviction" (required for photo-import mode)',
-    )
-    parser.add_argument(
-        "--photo-date",
-        type=str,
-        default=None,
-        help="Date for photo records (YYYY-MM-DD). Defaults to today.",
-    )
-    parser.add_argument(
-        "--no-perspective-correct",
-        action="store_true",
-        dest="no_perspective_correct",
-        help="Skip perspective correction in photo preprocessing (photo-import mode)",
     )
     # Chesterfield ACA Code Violation report args
     parser.add_argument(
@@ -1588,27 +1381,6 @@ def cli_main() -> None:
         action="store_true",
         dest="va_headed",
         help="Run VA public notice puller with visible browser (default: headless)",
-    )
-    # Dropbox watcher arguments
-    parser.add_argument(
-        "--poll-interval",
-        type=int,
-        default=None,
-        dest="poll_interval",
-        help="Seconds between Dropbox polls (default: 900 = 15 min)",
-    )
-    parser.add_argument(
-        "--max-polls",
-        type=int,
-        default=None,
-        dest="max_polls",
-        help="Maximum number of poll cycles (default: infinite)",
-    )
-    parser.add_argument(
-        "--no-delete",
-        action="store_true",
-        dest="no_delete",
-        help="Don't delete photos from Dropbox after processing",
     )
     # CSV import arguments
     parser.add_argument(
@@ -2133,26 +1905,6 @@ def cli_main() -> None:
 
     if args.mode == "chesterfield-code-violation":
         _run_chesterfield_aca(args)
-        return
-
-    # PDF import mode — separate pipeline
-    if args.mode == "pdf-import":
-        _run_pdf_import(args)
-        return
-
-    # Photo import mode — separate pipeline
-    if args.mode == "photo-import":
-        _run_photo_import(args)
-        return
-
-    # Dropbox watcher mode — polls for new photos
-    if args.mode == "dropbox-watch":
-        from dropbox_watcher import run_watcher
-        run_watcher(
-            poll_interval=args.poll_interval,
-            delete_after=not getattr(args, "no_delete", False),
-            max_polls=args.max_polls,
-        )
         return
 
     # CSV re-import mode — separate pipeline

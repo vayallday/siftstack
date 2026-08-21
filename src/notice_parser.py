@@ -310,6 +310,48 @@ _KNOWN_BAD_ADDRS = [
 ]
 
 
+def detect_deceased_indicator(owner_name: str) -> str:
+    """Detect deceased-owner indicators from an owner-of-record name.
+
+    Returns one of: "life_estate", "personal_rep", "care_of", "et_al",
+    "trustee", or "" (no indicator detected). Priority order reflects
+    confidence level (highest first).
+
+    Populates ``NoticeData.deceased_indicator``, which rides through to the
+    DataSift CSV and gates deep-prospecting candidate selection. Promoted
+    here from the archived TN tax enricher — the logic is pure owner-name
+    regex and is source- and state-agnostic.
+    """
+    if not owner_name or not owner_name.strip():
+        return ""
+
+    upper = owner_name.upper()
+
+    # 1. Personal Representative — strongest signal (definite estate)
+    if "PERSONAL REPRESENTATIVE" in upper or "PERSONAL REP" in upper:
+        return "personal_rep"
+
+    # 2. Life Estate — very strong signal (elderly/deceased holder)
+    if "LIFE EST" in upper:
+        return "life_estate"
+
+    # 3. Care-of (%) — strong signal for deceased/incapacitated
+    if "%" in owner_name:
+        return "care_of"
+
+    # 4. Et Al — moderate signal (multiple parties, often heirs)
+    if re.search(r"\bET\s+AL\b", upper):
+        return "et_al"
+
+    # 5. Trustee — weakest signal; skip business entities
+    if re.search(r"\bTRUSTEE\b", upper):
+        import config as _cfg
+        if not _cfg.BUSINESS_RE.search(upper):
+            return "trustee"
+
+    return ""
+
+
 def _is_valid_address(addr: str) -> bool:
     """Reject addresses that are clearly not property addresses."""
     if not addr or len(addr.strip()) < 5:

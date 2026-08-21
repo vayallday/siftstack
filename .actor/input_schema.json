@@ -115,7 +115,7 @@
         "anthropic_api_key": {
             "title": "Anthropic API Key",
             "type": "string",
-            "description": "API key for Claude Haiku LLM parsing. Used by the photo-import OCR fallback and obituary enricher. Optional but recommended.",
+            "description": "API key for Claude Haiku LLM parsing. Used by the obituary enricher and the VA public-notice LLM parser. Optional but recommended.",
             "editor": "textfield",
             "isSecret": true
         },

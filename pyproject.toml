@@ -9,6 +9,14 @@ python_classes = ["Test*"]
 python_functions = ["test_*"]
 asyncio_mode = "auto"
 addopts = "-ra --strict-markers"
+
+# tests/manual/ and tests/recon/ are excluded from default collection.
+# They hit live services (Playwright browsers, PropertyRadar, DataSift,
+# obituary search engines) and several block at IMPORT time, which used to
+# hang `pytest tests/` indefinitely. Run them explicitly by path:
+#   pytest tests/manual/test_datasift_upload.py
+norecursedirs = ["manual", "recon", "fixtures", "__pycache__"]
+
 markers = [
     "live_pr: opt-in integration tests against the live PropertyRadar account (costs real billing — run manually with -m live_pr only)",
 ]

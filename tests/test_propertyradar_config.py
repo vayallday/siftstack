@@ -1,8 +1,8 @@
 """Unit tests for src/propertyradar_config.py.
 
-Validates DEC-pr-lists fidelity (locked list config), PR-07 coexistence
-guarantees (state files distinct from the archived TN scraper's),
-PR-03 state-file round-trip, and selector-placeholder discipline.
+Validates DEC-pr-lists fidelity (locked list config), state-file
+placement, PR-03 state-file round-trip, and selector-placeholder
+discipline.
 """
 
 import re
@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 
-from _legacy_tn import tn_config
 import propertyradar_config as prc
 
 
@@ -23,7 +22,9 @@ def test_lists_length_is_four():
 
 EXPECTED_NAMES = {
     "MD_Auction in 90 Days_No Pre-Probate_No Vacant",
-    "VA_Auction in 90 Days_No Pre-Probate_No Vacant",
+    # NOTE: no "in" — unlike its MD twin. Corrected in b1381ee after the
+    # mismatch silently dropped every VA foreclosure from the daily pull.
+    "VA_Auction 90 Days_No Pre-Probate_No Vacant",
     "MD_Pre-Probate_Distress >60_Occupied",
     "VA_Pre-Probate_Distress >60_Occupied",
 }
@@ -79,11 +80,10 @@ def test_pr_notice_types_all_mapped_to_datasift_list():
     )
 
 
-# ── Coexistence (PR-07) ──────────────────────────────────────────
+# ── State-file placement ─────────────────────────────────────────
 
-def test_state_files_distinct_from_tn():
-    assert prc.PR_STATE_FILE != tn_config.STATE_FILE
-    assert prc.PR_COOKIES_FILE != tn_config.COOKIES_FILE
+def test_state_and_cookie_files_are_distinct():
+    assert prc.PR_STATE_FILE != prc.PR_COOKIES_FILE
 
 
 def test_state_files_under_project_root():

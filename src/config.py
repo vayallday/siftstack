@@ -22,13 +22,6 @@ load_dotenv()
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = PROJECT_ROOT / "output"
 LOG_DIR = PROJECT_ROOT / "logs"
-DROPBOX_STATE_FILE = PROJECT_ROOT / "dropbox_state.json"
-PHOTO_STATE_FILE = PROJECT_ROOT / "photo_state.json"
-
-# ── Dropbox Watcher ────────────────────────────────────────────────────
-DROPBOX_POLL_INTERVAL = int(os.getenv("DROPBOX_POLL_INTERVAL", "900"))  # seconds (default 15 min)
-DROPBOX_ROOT_FOLDER = os.getenv("DROPBOX_ROOT_FOLDER", "")  # root folder path in Dropbox
-DROPBOX_STORAGE_WARN_PERCENT = 80  # warn when storage usage exceeds this %
 
 OUTPUT_DIR.mkdir(exist_ok=True)
 LOG_DIR.mkdir(exist_ok=True)
@@ -47,9 +40,6 @@ DATASIFT_PASSWORD = os.getenv("DATASIFT_PASSWORD", "")
 SLACK_WEBHOOK_URL = os.getenv("SLACK_WEBHOOK_URL", "")        # Slack/Discord webhook
 ANCESTRY_EMAIL = os.getenv("ANCESTRY_EMAIL", "")              # Ancestry.com login
 ANCESTRY_PASSWORD = os.getenv("ANCESTRY_PASSWORD", "")
-DROPBOX_APP_KEY = os.getenv("DROPBOX_APP_KEY", "")            # Dropbox OAuth2 app key
-DROPBOX_APP_SECRET = os.getenv("DROPBOX_APP_SECRET", "")
-DROPBOX_REFRESH_TOKEN = os.getenv("DROPBOX_REFRESH_TOKEN", "")
 
 # ── LLM Backend ──────────────────────────────────────────────────────
 LLM_BACKEND = os.getenv("LLM_BACKEND", "anthropic")           # "anthropic", "ollama", or "openrouter"
@@ -65,11 +55,6 @@ OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/ap
 REQUEST_DELAY_MIN = 2.0  # seconds between requests
 REQUEST_DELAY_MAX = 3.0
 MAX_RETRIES = 3
-
-# ── Image Processing ───────────────────────────────────────────────────
-BLUR_THRESHOLD = int(os.getenv("BLUR_THRESHOLD", "100"))   # Laplacian variance; below = rejected as blurry
-TESSERACT_PSM_PDF = 3    # fully automatic — best for PDF tax sale tables
-TESSERACT_PSM_PHOTO = 4  # assume single column of variable-size text — best for terminal screen photos
 
 # ── Entity Detection ──────────────────────────────────────────────────
 # Business entity patterns — shared across obituary_enricher, tax_enricher,

@@ -577,64 +577,6 @@ def main():
         "Administrator: JOHN DOE, 456 OAK RIDGE HIGHWAY OAK RIDGE, TN 37830",
         "456 Oak Ridge", "Highway Oak Ridge", "37830")
 
-    print("\n-- Property lookup name formatting tests --")
-
-    # property_lookup was archived with the rest of the TN data-pull stack
-    # (src/_legacy_tn/) — the helpers themselves are state-agnostic regex
-    # so we still exercise them, just from the archive package.
-    from _legacy_tn.property_lookup import (
-        _format_name_for_search,
-        _normalize_tpad_address,
-        _maiden_name_variant,
-    )
-
-    def name_format_test(label, input_name, expected):
-        global passed, failed
-        actual = _format_name_for_search(input_name)
-        if actual == expected:
-            passed += 1
-        else:
-            failed += 1
-            print(f"  FAIL [{label}] name_format: got '{actual}', expected '{expected}'")
-
-    name_format_test("format-simple", "JOHN SMITH", "SMITH JOHN")
-    name_format_test("format-middle", "JOHN A. SMITH", "SMITH JOHN A")
-    name_format_test("format-jr-suffix", "JOHN SMITH JR", "SMITH JOHN")
-    name_format_test("format-and-spouse", "JOHN AND JANE SMITH", "SMITH JOHN")
-    name_format_test("format-single", "SMITH", "SMITH")
-    name_format_test("format-three-parts", "RHYS GRAVES CLAIBORNE", "CLAIBORNE RHYS GRAVES")
-
-    print("\n-- Maiden name variant tests --")
-
-    def maiden_test(label, decedent_name, expected):
-        global passed, failed
-        actual = _maiden_name_variant(decedent_name)
-        if actual == expected:
-            passed += 1
-        else:
-            failed += 1
-            print(f"  FAIL [{label}] maiden: got '{actual}', expected '{expected}'")
-
-    maiden_test("maiden-4-parts", "LULA ELIZABETH MASSIE JONES", "MASSIE LULA")
-    maiden_test("maiden-3-parts", "JOHN ALAN SMITH", None)  # Only 3 parts — no maiden
-    maiden_test("maiden-2-parts", "JOHN SMITH", None)  # Too short
-    maiden_test("maiden-with-suffix", "MARY ANN BAKER WILLIAMS JR", "BAKER MARY")
-    maiden_test("maiden-empty", "", None)
-
-    def tpad_addr_test(label, input_addr, expected):
-        global passed, failed
-        actual = _normalize_tpad_address(input_addr)
-        if actual == expected:
-            passed += 1
-        else:
-            failed += 1
-            print(f"  FAIL [{label}] tpad_addr: got '{actual}', expected '{expected}'")
-
-    tpad_addr_test("tpad-number-after", "MADISON AVE 1605", "1605 MADISON AVE")
-    tpad_addr_test("tpad-no-number", "RIVERVIEW DR", "RIVERVIEW DR")
-    tpad_addr_test("tpad-normal", "1605 MADISON AVE", "1605 MADISON AVE")
-    tpad_addr_test("tpad-with-spaces", "HENRY LN 807", "807 HENRY LN")
-
     # ── SUMMARY ──
 
     print()

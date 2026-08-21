@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **SiftStack** — Full-stack real estate investing operations platform built around DataSift.ai CRM. Covers the entire REI business lifecycle:
 
-1. **Data Acquisition:** PropertyRadar list pulls (foreclosures, pre-probate) via Playwright against app.propertyradar.com, scanned PDF import, courthouse terminal photo import (probate, eviction, code violations, divorce), Dropbox auto-polling
+1. **Data Acquisition:** Four automated feeds — PropertyRadar list pulls (foreclosures, pre-probate) via Playwright against app.propertyradar.com; Virginia Press Association public notices (probate/foreclosure/tax sale); Chesterfield ACA bulk code violations; Richmond Vacant Building List
 2. **Enrichment Pipeline:** 10+ steps — Smarty address standardization, Zillow property data, obituary/heir research, Ancestry.com SSDI, Tracerfy skip trace, Trestle phone scoring, entity research
 3. **Deal Analysis:** Comparable sales (Two-Bucket ARV), rehab estimation (4-tier room-by-room), deal analyzer (MAO/ROI/financing scenarios)
 4. **Market Intelligence:** Zip code scoring, Market Finder reports, cash buyer list building, investor portfolio analysis
@@ -18,17 +18,24 @@ Currently focused on Virginia (Richmond, Henrico, Chesterfield, Prince William) 
 
 8. **REI Skill Library:** 13 Claude Co-Work skill files (`.skill`/`.plugin` ZIPs) for distribution to DataSift community via [learn.datasift.ai/claude-skills-rei](https://learn.datasift.ai/claude-skills-rei). Skills teach Claude specific REI workflows when uploaded to Co-Work sessions or Projects.
 
-### Archived: Tennessee public-notice acquisition
+### Removed: Tennessee acquisition + courthouse photo/PDF import
 
 The original data source was `tnpublicnotice.com` for Knox + Blount, TN.
-Those acquisition files (the Playwright scraper, the 2Captcha integration,
-the TN trustee-sale filter, the Knox County tax API client, the Knox
-KGIS + Blount TPAD property-lookup helpers, and the TN-specific config)
-moved to [src/_legacy_tn/](src/_legacy_tn/) when the focus shifted to
-VA/MD. Nothing under that folder is imported by any active code path —
-it's preserved as documentation and as a starting point for any future
-state that needs a similar ASP.NET / reCAPTCHA-gated scrape pipeline.
-See [src/_legacy_tn/README.md](src/_legacy_tn/README.md).
+Those files lived under `src/_legacy_tn/` after the focus shifted to
+VA/MD, and were **deleted** in the minimal-live-path rebuild — nothing
+imported them. The one still-useful piece, `detect_deceased_indicator()`,
+was promoted into [src/notice_parser.py](src/notice_parser.py); the
+2Captcha helper had already been promoted to
+[src/captcha_solver.py](src/captcha_solver.py). Recover the rest from git
+history if a future state needs an ASP.NET / reCAPTCHA-gated scraper —
+`git show 8457388:src/_legacy_tn/scraper.py`.
+
+The courthouse photo pipeline (`photo_importer.py`, `pdf_importer.py`,
+`image_utils.py`, `dropbox_watcher.py`, `dropbox_uploader.py`) was removed
+in the same pass. It was built for TN courthouse terminals, never wired to
+a VA/MD court, and carried the heaviest dependencies in the image
+(opencv, numpy, Pillow, pytesseract, dropbox). Same recovery path via git
+history if a VA/MD courthouse run ever starts.
 
 ## Commands
 
@@ -38,7 +45,7 @@ pip install -r requirements.txt
 playwright install chromium
 cp .env.example .env  # then fill in credentials
 
-# Run — PropertyRadar pulls (the only acquisition source)
+# Run — PropertyRadar pulls (primary acquisition source)
 python src/main.py daily                          # pull deltas across all configured PR lists
 python src/main.py historical                     # same flow (PR has no Added-Date filter; delta is membership-diff)
 python src/main.py daily --split                  # separate CSV per list
@@ -71,36 +78,40 @@ python src/main.py manage-presets --all                           # discovery + 
 python src/main.py manage-sold --months-back 12                   # tag sold properties (last 12 months)
 python src/main.py manage-sold --counties Henrico --min-sale-price 5000
 
-# Courthouse photo import (build 1.0.28+)
-python src/main.py photo-import --folder ./photos --photo-county Henrico --photo-type probate
-python src/main.py photo-import --folder ./photos --photo-county Henrico --photo-type eviction --skip-obituary
-python src/main.py dropbox-watch                                  # auto-poll Dropbox for new photos
-python src/main.py dropbox-watch --poll-interval 300 --max-polls 5  # 5-min interval, 5 cycles
-python src/main.py dropbox-watch --no-delete                      # keep photos in Dropbox after processing
+# Re-enrich an existing CSV (no new acquisition)
+python src/main.py csv-import --csv-path output/some.csv --csv-county Henrico
 ```
 
 All source files are in `src/` and imports assume `src/` is the working directory. Run from project root with `python src/main.py` or set `PYTHONPATH=src`.
+
+### Tests
+
+```bash
+PYTHONPATH=src python -m pytest tests/ -q        # 205 unit tests, ~0.2s to collect
+```
+
+`tests/manual/` (live Playwright / PropertyRadar / DataSift / network) and
+`tests/recon/` (one-off source-discovery scripts) are excluded from default
+collection via `norecursedirs` — several block at import time and used to
+hang `pytest tests/` indefinitely. Run those explicitly by path.
 
 ## Architecture
 
 **Data flows:**
 - **PropertyRadar pull:** `main.py` → `propertyradar_puller.py` (Playwright against app.propertyradar.com) → membership-diff vs `pr_state.json` → CSV export wizard → `propertyradar_parser.py` → enrichment → CSV
-- **PDF import:** `main.py` → `pdf_importer.py` (pypdfium2 → `image_utils.py` OCR) → enrichment → CSV
-- **Photo import:** `main.py` → `photo_importer.py` (OpenCV → `image_utils.py` OCR → `llm_parser.py`) → enrichment → CSV
-- **Dropbox watch:** `dropbox_watcher.py` → `photo_importer.py` → enrichment → CSV (auto-polling loop)
+- **VA public notice:** `main.py` → `va_public_notice_puller.py` (login → per-county search → preview-classify → captcha → LLM parse) → enrichment → CSV
+- **Chesterfield ACA:** `main.py` → `chesterfield_aca_puller.py` (Playwright report form → XLSX → openpyxl) → enrichment → CSV
+- **Richmond vacant:** `main.py` → `richmond_vacant_puller.py` (probe rva.gov PDF → pdfplumber) → enrichment → CSV
 - **Market Finder:** `extract_market_finder.py` → DataSift Market Finder (Playwright) → paginate all ZIP + neighborhood data → JSON
 
-- **main.py** — CLI entry point. Modes: `daily`/`historical` (PropertyRadar pulls), `pdf-import`, `photo-import`, `dropbox-watch`, `csv-import`, `phone-validate`, `manage-presets`, `manage-sold`, plus analysis modes (`comp`, `rehab`, `analyze-deal`, `market-analysis`, `buyer-prospect`, `deep-prospect`, `lead-manage`, `setup-sequences`, `niche-sequential`, `playbook`).
+- **main.py** — CLI entry point. Modes: `daily`/`historical` (PropertyRadar pulls), `va-public-notice`, `chesterfield-code-violation`, `richmond-vacant`, `csv-import`, `phone-validate`, `manage-presets`, `manage-sold`, plus analysis modes (`comp`, `rehab`, `analyze-deal`, `market-analysis`, `buyer-prospect`, `deep-prospect`, `lead-manage`, `setup-sequences`, `niche-sequential`, `playbook`).
 - **propertyradar_puller.py** — Playwright automation of `app.propertyradar.com` lists. Two-phase BufferedStore scrape (prime → poll → read RadarIDs), membership-diff vs `pr_state.json`, two-step export wizard (Continue → Purchase → Download CSV), quota guard.
-- **propertyradar_config.py** — Locked 4-list registry (`PROPERTYRADAR_LISTS`), JS snippets for the ExtJS grid Store API, selectors, state-file paths, schema versioning. See `src/_legacy_tn/README.md` for the previous TN equivalents.
+- **propertyradar_config.py** — Locked 4-list registry (`PROPERTYRADAR_LISTS`), JS snippets for the ExtJS grid Store API, selectors, state-file paths, schema versioning.
 - **propertyradar_parser.py** — PR CSV → `NoticeData`. Handles PR's abbreviated column names ("Radar ID", "Mail Address", etc.) and filters PR's license-disclaimer footer rows via `_RADAR_ID_RE`.
 - **propertyradar_quota.py** — Monthly export quota tracker (10K Solo plan), per-month dedup of 50/80/95/100% threshold alerts, `format_quota_summary()` for Slack appendix.
-- **notice_parser.py** — Defines the `NoticeData` dataclass used by every puller. Also contains regex-based parsers for free-text notice bodies (legacy TN web-scrape pipeline; PR pulls don't need them).
+- **notice_parser.py** — Defines the `NoticeData` dataclass used by every puller, plus `detect_deceased_indicator()` (owner-name markers: LIFE EST / PERSONAL REP / ET AL / TRUSTEE / care-of). Also carries regex parsers for free-text notice bodies, kept for the VA public-notice path; PR pulls don't need them.
 - **data_formatter.py** — Deduplicates by address (keeps most recent), converts `NoticeData` list to upload CSV. Split mode produces `{county}_{type}_{timestamp}.csv` files.
-- **config.py** — State-agnostic config: credentials for Smarty/Zillow/Anthropic/Tracerfy/Trestle/DataSift/Slack/Dropbox/etc., paths, image-processing thresholds, entity-detection regexes, JSON state-file utilities. No acquisition-source-specific config — those live next to the puller (`propertyradar_config.py`, `_legacy_tn/tn_config.py`).
-- **image_utils.py** — Shared OCR utilities used by both `pdf_importer.py` and `photo_importer.py`. Exports `fix_rotation()` (Tesseract OSD) and `ocr_page(image, psm)` with configurable page segmentation mode. Handles Tesseract binary detection.
-- **photo_importer.py** — Courthouse phone photo import. OpenCV preprocessing chain (EXIF transpose → blur check → bilateral filter → perspective correction → Otsu threshold) → Tesseract OCR (PSM 4) → LLM parsing → NoticeData. Supports all 7 notice types.
-- **dropbox_watcher.py** — Cursor-based Dropbox folder polling. Downloads new photos, resolves county + notice_type from folder path (`/Henrico/eviction/photo.jpg`), processes through photo_importer, deletes from Dropbox after success. State persisted to `dropbox_state.json` + `photo_state.json`.
+- **config.py** — State-agnostic config: credentials for Smarty/Zillow/Anthropic/Tracerfy/Trestle/DataSift/Slack/etc., paths, entity-detection regexes, JSON state-file utilities. No acquisition-source-specific config — that lives next to each puller (`propertyradar_config.py`, `va_public_notice_config.py`).
 - **report_generator.py** — Generates per-record PDF deep prospecting reports using reportlab. Includes property summary, signing chain with phone tiers, valuation, deceased owner detection. Output to `output/reports/`.
 - **extract_market_finder.py** — Playwright automation to extract ALL ZIP code + neighborhood data from DataSift Market Finder. Handles styled-component dropdowns, pagination (20 rows/page), Beamer popup dismissal. Outputs JSON. See "Market Finder Extraction Patterns" below.
 - **market_analyzer.py** — ZIP code scoring engine. 6-factor weighted composite (Distress 30%, Value 20%, Equity 15%, Tax Delinquency 15%, Competition 10%, DOM 10%). Grades A/B/C/D, budget allocation across top ZIPs. Reads from scraped notice CSVs in `output/`.
@@ -123,7 +134,7 @@ PR's web UI has **no Added-Date filter** so we can't filter exports server-side.
 
 - **PropertyRadar quota:** 10,000 record exports per month on the Solo plan. `propertyradar_quota.py` tracks consumption in `pr_quota.json` and fires Slack alerts at 50/80/95/100% (per-month dedup). The puller refuses to export beyond budget.
 - **Probate owner_name** should be the Personal Representative/Executor/Administrator — not the deceased.
-- **PropertyRadar `pre_probate` is NOT court probate.** It's a property-records signal (deceased owner per assessor data); no PR/executor is named. Distinct from court-filed `probate`, which doesn't exist for VA/MD until a photo-import pipeline is wired to those courthouses.
+- **PropertyRadar `pre_probate` is NOT court probate.** It's a property-records signal (deceased owner per assessor data); no PR/executor is named. Distinct from court-filed `probate`, which for VA comes from the Virginia Press Association Estate Claims feed (`va-public-notice` mode). MD has no probate source.
 - **Rate limiting:** 2-3 second random delays between requests, 3 retries per page.
 - **Address dedup:** Same property can appear in multiple lists; `data_formatter.deduplicate()` keeps the most recent.
 
@@ -188,64 +199,44 @@ apify push
 - `src/drive_uploader.py` — Google Drive upload via base64-encoded service account key
 - `input.json` — Local test input (gitignored, contains credentials)
 
-## Courthouse Photo Pipeline (build 1.0.28+)
+## Notice Types + Deep Prospecting
 
-Courthouse terminal photos → OCR → LLM parse → enrichment → DataSift. Runner takes phone photos at county courthouse terminals, uploads to Dropbox organized as `{county}/{notice_type}/`, system auto-processes. The OCR + parse layer is state-agnostic; only the obituary enricher's domain whitelist and the address standardizer's default state would need to be retargeted for non-TN courts.
-
-### Notice Types (8 total)
-- `foreclosure`, `tax_sale`, `tax_delinquent`, `probate` — court-filed (originally from TN web scraper; foreclosure now also from PropertyRadar for VA/MD)
-- `eviction` — plaintiff = landlord (target contact), defendant = tenant
-- `code_violation` — owner of record, violation type, compliance deadline
-- `divorce` — petitioner + respondent, property from schedule page
+### Notice Types (9 total)
+- `foreclosure` — PropertyRadar VA/MD auction lists + VA public-notice trustee sales
+- `probate` — court-filed, PR/executor named. VA source is the Virginia Press Association Estate Claims feed
+- `tax_sale` — VA public-notice tax deeds
+- `tax_delinquent` — no active feed; type retained for CSV/DataSift compatibility
+- `code_violation` — Chesterfield ACA bulk report; owner of record, violation type, compliance deadline
+- `vacant_building` — Richmond Vacant Building List vacancy registry
+- `eviction`, `divorce` — no active feed; types retained for CSV/DataSift compatibility
 - `pre_probate` — **PropertyRadar-only**, property-records deceased signal (owner is dead per assessor data; no executor named, no court filing). Distinct from `probate` because DM identification depends on obituary search rather than a named PR/executor on the filing. `owner_deceased="yes"` is set upfront so a failed obituary lookup still tags the record correctly.
 
-### Critical OCR Patterns (hard-won from live testing)
+`eviction`, `divorce`, and `tax_delinquent` have no acquisition source in
+VA/MD today. They stay in the taxonomy because `datasift_formatter` maps
+each to a DataSift list and existing records carry those types.
 
-**Moire pattern from terminal screens is the #1 OCR killer.** Standard Tesseract preprocessing (adaptive threshold, CLAHE) produces garbage on courthouse terminal photos. The fix:
-- **Bilateral filter** (`cv2.bilateralFilter(gray, 15, 75, 75)`) removes moire while preserving text edges
-- **Otsu threshold** (`cv2.THRESH_BINARY + cv2.THRESH_OTSU`) after bilateral — auto-determines optimal binary threshold
-- **PSM 4** (single column variable text) for terminal screens — NOT PSM 6 (single uniform block) which was the research recommendation but fails in practice
-- **Do NOT use `fix_rotation()` (Tesseract OSD) on phone photos** — EXIF transpose handles rotation. OSD on raw phone images often fails and the 270° fallback rotates correct images sideways
+### Deep Prospecting (obituary enricher)
 
-### Probate Deep Prospecting (from courthouse terminals)
+Probate records name a decedent + PR/executor but often carry no property
+address. Address lookup runs people search (Serper/Firecrawl + LLM
+extraction) with a DuckDuckGo fallback, in
+`obituary_enricher._lookup_dm_address()`.
 
-Courthouse probate records have decedent name + PR/executor name but NO property address. Property-address lookup originally went through a 3-tier waterfall (Knox Tax API → executor family search → people search). The Knox Tax API tier was archived to `src/_legacy_tn/tax_enricher.py` when TN was retired. The remaining generic tiers (people search via Serper/Firecrawl + LLM extraction; DuckDuckGo fallback) are state-neutral and live in `obituary_enricher._lookup_dm_address()`.
-
-**Probate Preset** (obituary enricher):
-- Triggers when court record has PR name + decedent name (no address required) — prevents wrong obituary from overriding court-named executor
+**Probate Preset:**
+- Triggers when the record has PR name + decedent name (no address required) — prevents a wrong obituary from overriding the court-named executor
 - Sets DM = the named PR/executor directly, skips obituary search entirely
 - Then runs DM address lookup (People Search → Tracerfy)
 
-**DOD Sanity Check** (obituary enricher):
+**DOD Sanity Check:**
 - Rejects obituary matches where DOD is > 3 years before the notice filing date (`MAX_DOD_GAP_YEARS = 3`)
-- Prevents matching a 2014 obituary to a 2025 court filing (wrong person with same name)
+- Prevents matching a 2014 obituary to a 2025 court filing (wrong person, same name)
 - Applied to both full-page and snippet matches
 
-### Dropbox Folder Structure
-```
-{DROPBOX_ROOT_FOLDER}/
-├── {County}/
-│   ├── eviction/
-│   ├── code_violation/
-│   ├── divorce/
-│   ├── foreclosure/
-│   ├── tax_sale/
-│   └── probate/
-└── {OtherCounty}/
-    └── (same subfolders)
-```
-
-### Environment Variables
-- `DROPBOX_APP_KEY` — Dropbox OAuth2 app key
-- `DROPBOX_APP_SECRET` — Dropbox OAuth2 app secret
-- `DROPBOX_REFRESH_TOKEN` — Dropbox offline refresh token (auto-rotates access tokens)
-- `DROPBOX_POLL_INTERVAL` — seconds between polls (default 900 = 15 min)
-- `DROPBOX_ROOT_FOLDER` — root folder path in Dropbox (e.g., "SiftStack")
-
-### Dependencies (added to requirements.txt)
-- `opencv-python-headless>=4.13.0` — image preprocessing (headless = no GUI, saves 26MB in Docker)
-- `numpy>=1.26.0` — required by OpenCV
-- `dropbox>=12.0.2` — Dropbox SDK (minimum for post-Jan-2026 API compatibility)
+**Owner-name deceased markers:** `notice_parser.detect_deceased_indicator()`
+classifies an owner-of-record string into `personal_rep`, `life_estate`,
+`care_of`, `et_al`, or `trustee` (business entities excluded). Populates
+`NoticeData.deceased_indicator`, which rides into the DataSift CSV and
+gates deep-prospecting candidate selection.
 
 ## Richmond Vacant Building List — Vacancy Registry Feed (build 1.0.30+)
 
@@ -255,8 +246,9 @@ Operator-confirmed taxonomy (2026-05-25):
 - **Richmond code violations** → OPP / EnerGov portal (see "Richmond OPP" section)
 - **Richmond vacancy registry** → this PDF
 - **Richmond full code violation caseload bulk** → email request to
-  `PropertyMaintenance@rva.gov`, then drop response into
-  `{DROPBOX_ROOT_FOLDER}/Richmond/code_violation/` for the existing Dropbox pipeline.
+  `PropertyMaintenance@rva.gov`. The Dropbox intake pipeline that used to
+  consume the response was removed; re-enrich the returned file with
+  `python src/main.py csv-import --csv-path <file> --csv-county "Richmond City"`.
 
 ### Key Files
 - `src/richmond_vacant_puller.py` — probes URL pattern, fetches PDF, parses via
@@ -796,8 +788,8 @@ upload pipeline.
 - "Purchase" / "Export" both count against quota even for re-exports of the same list — never export the full list when the diff is empty.
 
 **Coverage gaps in VA/MD:**
-- Foreclosure ✓, Divorce ✓, Assessor/Recorder (incl. deceased-owner signal for `pre_probate`) ✓.
-- Probate, Eviction, Code Violation — **NOT available** in VA/MD. Those are still photo-import notice types (`src/photo_importer.py`) sourced from county courthouse terminals.
+- PropertyRadar covers Foreclosure ✓, Divorce ✓, Assessor/Recorder (incl. the deceased-owner signal for `pre_probate`) ✓.
+- Probate, Eviction, Code Violation are **NOT available** from PropertyRadar in VA/MD. Probate is now filled by the VA public-notice feed (Estate Claims) and Code Violation by the Chesterfield ACA feed. Eviction has no source.
 
 **`pre_probate` vs `probate`:**
 PR's deceased-owner signal is property-records based (no executor named, no court filing). The pipeline tags this as `pre_probate` to distinguish it from court-filed `probate` — the latter has a named PR/executor and triggers the obituary-enricher's "DM = named PR" preset; the former needs heir research because we only know the owner is dead.

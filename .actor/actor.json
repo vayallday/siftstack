@@ -2,7 +2,7 @@
     "actorSpecification": 1,
     "name": "siftstack-propertyradar",
     "title": "SiftStack — REI Operations Platform",
-    "description": "Full-stack real estate investing operations platform. PropertyRadar list pulls (VA/MD), courthouse photo + PDF import, enrichment (Smarty, Zillow, obituary, skip trace), deal analysis (comps, rehab, MAO), CRM automation (DataSift sequences, niche sequential), and lead management.",
+    "description": "Real estate investing lead acquisition for VA/MD. PropertyRadar list pulls, Virginia Press Association notices, Chesterfield ACA code violations, and the Richmond Vacant Building List — enriched (Smarty, Zillow, obituary/heir research, skip trace, Trestle phone scoring) and pushed into the DataSift CRM.",
     "version": "1.0",
     "buildTag": "latest",
     "input": "./input_schema.json",
