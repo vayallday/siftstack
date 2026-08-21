@@ -655,6 +655,15 @@ async def _filter_by_list(page: Page, list_name: str) -> bool:
     try:
         await _dismiss_popups(page)
 
+        # Clear any pre-existing filters / saved-preset tab (e.g. "02. Ready to
+        # Call") so the list filter isn't AND-ed with a stale status filter that
+        # silently narrows the result set to the wrong records.
+        clear_filters = page.locator('text="Clear Filters"')
+        if await clear_filters.count() > 0:
+            await clear_filters.first.click()
+            await page.wait_for_timeout(1500)
+            logger.info("Cleared existing record filters before applying list filter")
+
         # Open filter panel — "Filter Records" is an <a> link at top-right
         filter_link = page.locator('#Records__Filters_Trigger')
         if await filter_link.count() == 0:
@@ -817,12 +826,20 @@ async def _select_all_records(page: Page) -> bool:
 
         await _screenshot(page, "records_selected_header")
 
-        # After checking the header checkbox, a "Select All X records" banner may appear
-        select_all_link = page.locator('text="Select all"')
+        # After checking the header checkbox, only the visible page (~10) is
+        # selected. DataSift then shows a "Select all N records" banner to
+        # expand the selection to ALL matching records. The banner text
+        # includes the count (e.g. "Select all 216 records"), so an exact
+        # 'text="Select all"' match misses it — use a substring match.
+        select_all_link = page.get_by_text("Select all", exact=False)
         if await select_all_link.count() > 0:
+            banner_text = (await select_all_link.first.inner_text()).strip()
             await select_all_link.first.click()
             await page.wait_for_timeout(1000)
-            logger.debug("Clicked 'Select all' records link")
+            logger.info("Clicked select-all-matching banner: %r", banner_text)
+        else:
+            logger.warning("No 'Select all N records' banner — only the visible "
+                           "page is selected (selection may be incomplete)")
 
         # Verify: check if Manage or Send To buttons are now visible
         manage_visible = await page.locator('button:has-text("Manage")').count() > 0
