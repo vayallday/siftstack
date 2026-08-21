@@ -37,6 +37,29 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+# ── Enablement ─────────────────────────────────────────────────────
+# PropertyRadar is retained in the codebase but is OFF by default as of
+# 2026-08-21 — no acquisition path calls it unless explicitly switched on.
+# Everything below (the list registry, selectors, puller, quota tracker)
+# stays intact so it can be re-enabled without recovering from git history.
+#
+# Turn it back on with any of:
+#   - env:   PROPERTYRADAR_ENABLED=true
+#   - CLI:   python src/main.py daily --enable-propertyradar
+#   - Apify: {"enable_propertyradar": true} in the Actor input
+_TRUTHY = {"1", "true", "yes", "on"}
+PROPERTYRADAR_ENABLED = os.getenv("PROPERTYRADAR_ENABLED", "").strip().lower() in _TRUTHY
+
+
+def is_enabled(cli_override: bool = False) -> bool:
+    """True if the PropertyRadar path should run.
+
+    ``cli_override`` comes from ``--enable-propertyradar`` / the Actor's
+    ``enable_propertyradar`` input and wins over the env default.
+    """
+    return bool(cli_override) or PROPERTYRADAR_ENABLED
+
+
 # ── Credentials ────────────────────────────────────────────────────
 # Mirrors src/config.py L38-39 pattern.
 PROPERTYRADAR_EMAIL = os.getenv("PROPERTYRADAR_EMAIL", "")

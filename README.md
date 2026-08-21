@@ -9,7 +9,7 @@ Full-stack real estate investing operations platform built for [DataSift.ai](htt
 **One pipeline, many inputs.** No matter how you get the data, it comes out the same way:
 
 ```
-  PropertyRadar Lists         ──┐
+  PropertyRadar (off by dflt) ──┐
   VA Public Notices (VPA)     ──┤
   Chesterfield ACA Violations ──┼──→  Enrichment Pipeline  ──→  DataSift Upload  ──→  Niche Sequential
   Richmond Vacant Building    ──┤     (10 steps)                (automated)          Marketing
@@ -20,7 +20,7 @@ Full-stack real estate investing operations platform built for [DataSift.ai](htt
 
 | Method | How It Works | Use Case |
 |--------|-------------|----------|
-| **PropertyRadar** | Playwright automation of app.propertyradar.com; membership-diff against stored RadarIDs, then export only the new records | Foreclosure auctions + pre-probate (deceased-owner) signal across VA/MD |
+| **PropertyRadar** *(disabled by default)* | Playwright automation of app.propertyradar.com; membership-diff against stored RadarIDs, then export only the new records | Foreclosure auctions + pre-probate (deceased-owner) signal across VA/MD. Enable with `--enable-propertyradar`. |
 | **VA Public Notice** | Playwright + 2Captcha against publicnoticevirginia.com Smart Search | Court probate (Estate Claims), trustee sales, tax deeds — 16 VA localities |
 | **Chesterfield ACA** | Playwright drives the public Accela date-range report, parses the XLSX | Bulk code violations, filtered to high-motivation code sections |
 | **Richmond Vacant** | Probes rva.gov for the newest Vacant Building List PDF, parses with pdfplumber | Vacancy registry for Richmond City |
@@ -76,10 +76,7 @@ playwright install chromium
 cp .env.example .env
 # Edit .env with your API keys (see Configuration below)
 
-# Pull today's new PropertyRadar records
-python src/main.py daily
-
-# Or pull Virginia public notices (probate / foreclosure / tax deed)
+# Pull Virginia public notices (probate / foreclosure / tax deed)
 python src/main.py va-public-notice
 
 # Or pull Chesterfield code violations
@@ -164,7 +161,8 @@ These apply to every scheduled run.
 ### All Intake Methods (optional)
 | Variable | Service | What It Does |
 |----------|---------|-------------|
-| `PROPERTYRADAR_EMAIL` / `PASSWORD` | [PropertyRadar](https://propertyradar.com) | Foreclosure + pre-probate list pulls |
+| `PROPERTYRADAR_EMAIL` / `PASSWORD` | [PropertyRadar](https://propertyradar.com) | Foreclosure + pre-probate list pulls (only used when PropertyRadar is enabled) |
+| `PROPERTYRADAR_ENABLED` | — | Set `true` to switch the PropertyRadar path back on (off by default) |
 | `VAPN_EMAIL` / `VAPN_PASSWORD` | [Virginia Public Notice](https://www.publicnoticevirginia.com) | Free Smart Search account for full notice text |
 | `CAPTCHA_API_KEY` | [2Captcha](https://2captcha.com) | reCAPTCHA solving on VA notice detail pages |
 | `ANCESTRY_EMAIL` / `PASSWORD` | [Ancestry.com](https://ancestry.com) | SSDI + obituary collection |
@@ -175,8 +173,8 @@ Every API is optional. Missing a key? That enrichment step is skipped and the pi
 
 ```bash
 # ── Data Acquisition ────────────────────────────────────────────
-python src/main.py daily                    # New PropertyRadar records since last run
-python src/main.py historical               # Same flow (delta is a membership diff)
+python src/main.py daily --enable-propertyradar     # PropertyRadar (OFF by default)
+python src/main.py historical --enable-propertyradar   # Same flow (delta is a membership diff)
 python src/main.py va-public-notice         # VA probate / foreclosure / tax deed notices
 python src/main.py chesterfield-code-violation   # Chesterfield ACA bulk report
 python src/main.py richmond-vacant          # Richmond Vacant Building List
@@ -278,8 +276,8 @@ src/
 
 | Type | Source | What to Look For |
 |------|--------|-----------------|
-| Foreclosure | PropertyRadar, VA Public Notice | Trustee sale, deed of trust default |
-| Pre-Probate | PropertyRadar | Deceased owner per assessor data — no court filing yet |
+| Foreclosure | VA Public Notice (PropertyRadar if enabled) | Trustee sale, deed of trust default |
+| Pre-Probate | *PropertyRadar only — no feed while disabled* | Deceased owner per assessor data — no court filing yet |
 | Probate | VA Public Notice (Estate Claims) | Estate administration, executor appointment |
 | Tax Sale | VA Public Notice | Delinquent property tax auction |
 | Code Violation | Chesterfield ACA | Building code, compliance deadline |

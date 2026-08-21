@@ -221,3 +221,36 @@ def test_pr_lists_url_uses_hash_route():
     """PR is a hash-routed SPA — PR_LISTS_URL must include the #!/myLists
     fragment so the puller's in-app nav lands on the right view."""
     assert "#!/myLists" in prc.PR_LISTS_URL
+
+
+# ── Enablement gate (PropertyRadar disabled by default, 2026-08-21) ──
+
+def test_propertyradar_is_disabled_by_default(monkeypatch):
+    """No env var set → the PR path must NOT run.
+
+    Guards the 2026-08-21 decision to retain PropertyRadar but stop calling
+    it. If this flips to True unintentionally, the daily/historical modes
+    start hitting the live PR account and consuming export quota again.
+    """
+    monkeypatch.delenv("PROPERTYRADAR_ENABLED", raising=False)
+    monkeypatch.setattr(prc, "PROPERTYRADAR_ENABLED", False)
+    assert prc.is_enabled() is False
+
+
+def test_cli_override_enables_propertyradar(monkeypatch):
+    """--enable-propertyradar / enable_propertyradar wins over the default."""
+    monkeypatch.setattr(prc, "PROPERTYRADAR_ENABLED", False)
+    assert prc.is_enabled(True) is True
+
+
+def test_env_var_enables_propertyradar(monkeypatch):
+    """PROPERTYRADAR_ENABLED=true switches it on with no CLI override."""
+    monkeypatch.setattr(prc, "PROPERTYRADAR_ENABLED", True)
+    assert prc.is_enabled() is True
+    assert prc.is_enabled(False) is True
+
+
+def test_list_registry_survives_disablement():
+    """Disabling must not gut the config — re-enabling has to be a flag
+    flip, not a git-history recovery."""
+    assert len(prc.PROPERTYRADAR_LISTS) == 4

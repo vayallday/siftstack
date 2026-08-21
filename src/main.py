@@ -44,13 +44,15 @@ def _preflight_check(mode: str) -> list[str]:
     datasift_modes = {"manage-presets", "manage-sold", "phone-validate"}
 
     if mode in scrape_modes:
-        from propertyradar_config import (
-            PROPERTYRADAR_EMAIL, PROPERTYRADAR_PASSWORD,
-        )
-        if not PROPERTYRADAR_EMAIL or not PROPERTYRADAR_PASSWORD:
+        import propertyradar_config as _prc
+        # Only a blocker when PropertyRadar is actually switched on. While
+        # it's disabled the daily/historical modes need no PR credentials.
+        if _prc.is_enabled() and (
+            not _prc.PROPERTYRADAR_EMAIL or not _prc.PROPERTYRADAR_PASSWORD
+        ):
             failures.append(
                 "PROPERTYRADAR_EMAIL / PROPERTYRADAR_PASSWORD not set "
-                "(required for daily/historical PropertyRadar pulls)"
+                "(required when PropertyRadar is enabled)"
             )
 
     if mode in enrichment_modes:
@@ -376,11 +378,24 @@ async def actor_main() -> None:
             await _apify_run_simple_feed_mode(actor_input, mode, pipeline_start)
             return
 
-        # Validate PropertyRadar credentials (required for daily/historical).
-        from propertyradar_config import (
-            PROPERTYRADAR_EMAIL as _PR_EMAIL,
-            PROPERTYRADAR_PASSWORD as _PR_PASS,
-        )
+        # PropertyRadar is off by default — a `daily`/`historical` run that
+        # doesn't opt in has no acquisition source, so end the run cleanly
+        # instead of failing the Actor on missing PR credentials.
+        import propertyradar_config as _prc
+        if not _prc.is_enabled(bool(actor_input.get("enable_propertyradar", False))):
+            Actor.log.warning(
+                "PropertyRadar is disabled — mode '%s' has no acquisition source. "
+                "Set enable_propertyradar=true to re-enable, or run one of: "
+                "va-public-notice, chesterfield-code-violation, richmond-vacant.",
+                mode,
+            )
+            await Actor.set_status_message(
+                "PropertyRadar disabled — nothing pulled"
+            )
+            return
+
+        # Validate PropertyRadar credentials (required once enabled).
+        _PR_EMAIL, _PR_PASS = _prc.PROPERTYRADAR_EMAIL, _prc.PROPERTYRADAR_PASSWORD
         if not _PR_EMAIL or not _PR_PASS:
             Actor.log.error("pr_username and pr_password are required")
             try:
@@ -1323,6 +1338,16 @@ def cli_main() -> None:
         action="store_true",
         help="Enable debug logging",
     )
+    parser.add_argument(
+        "--enable-propertyradar",
+        action="store_true",
+        dest="enable_propertyradar",
+        help=(
+            "Re-enable the PropertyRadar pull for daily/historical modes. "
+            "PropertyRadar is OFF by default; without this flag (or "
+            "PROPERTYRADAR_ENABLED=true) those modes pull nothing."
+        ),
+    )
     # Chesterfield ACA Code Violation report args
     parser.add_argument(
         "--aca-start",
@@ -1927,11 +1952,26 @@ def cli_main() -> None:
 def _run_scrape_pipeline(args) -> None:
     """Run the daily/historical PropertyRadar pull → enrich → export → upload pipeline.
 
-    PropertyRadar is the sole acquisition source. PR has no Added-Date
-    filter; delta is a membership-set diff against pr_state.json (see plan
-    02-04 SUMMARY), so `mode` (daily vs historical) doesn't affect what
-    gets pulled — both produce "new since last successful run".
+    PropertyRadar is DISABLED by default (see propertyradar_config.is_enabled).
+    When off, this returns without pulling anything — the VA feeds
+    (`va-public-notice`, `chesterfield-code-violation`, `richmond-vacant`)
+    are the active acquisition modes.
+
+    When on: PR has no Added-Date filter, so delta is a membership-set diff
+    against pr_state.json (see plan 02-04 SUMMARY) and `mode` (daily vs
+    historical) doesn't affect what gets pulled — both produce "new since
+    last successful run".
     """
+    import propertyradar_config as _prc
+    if not _prc.is_enabled(getattr(args, "enable_propertyradar", False)):
+        logging.warning(
+            "PropertyRadar is disabled — '%s' pulled nothing. Re-enable with "
+            "--enable-propertyradar or PROPERTYRADAR_ENABLED=true. Active "
+            "acquisition modes: va-public-notice, chesterfield-code-violation, "
+            "richmond-vacant.", args.mode,
+        )
+        return
+
     from propertyradar_puller import pull_all_lists
     logger.info("Running PropertyRadar puller (mode=%s)", args.mode)
     notices = asyncio.run(pull_all_lists(

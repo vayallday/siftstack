@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **SiftStack** — Full-stack real estate investing operations platform built around DataSift.ai CRM. Covers the entire REI business lifecycle:
 
-1. **Data Acquisition:** Four automated feeds — PropertyRadar list pulls (foreclosures, pre-probate) via Playwright against app.propertyradar.com; Virginia Press Association public notices (probate/foreclosure/tax sale); Chesterfield ACA bulk code violations; Richmond Vacant Building List
+1. **Data Acquisition:** Three active feeds — Virginia Press Association public notices (probate/foreclosure/tax sale), Chesterfield ACA bulk code violations, Richmond Vacant Building List. A fourth, PropertyRadar list pulls, is **disabled by default** (see "PropertyRadar — disabled by default" below) but fully retained.
 2. **Enrichment Pipeline:** 10+ steps — Smarty address standardization, Zillow property data, obituary/heir research, Ancestry.com SSDI, Tracerfy skip trace, Trestle phone scoring, entity research
 3. **Deal Analysis:** Comparable sales (Two-Bucket ARV), rehab estimation (4-tier room-by-room), deal analyzer (MAO/ROI/financing scenarios)
 4. **Market Intelligence:** Zip code scoring, Market Finder reports, cash buyer list building, investor portfolio analysis
@@ -14,7 +14,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 6. **Lead Management:** 4 Pillars of Motivation auto-qualification, STABM daily routine, pipeline reporting, deep prospecting (4-level framework)
 7. **Operations:** Acquisition playbook generator (SOPs, scripts, checklists), Slack/Discord notifications, Google Drive upload, Apify Actor deployment
 
-Currently focused on Virginia (Richmond, Henrico, Chesterfield, Prince William) and Maryland (Prince George's, Montgomery) markets via PropertyRadar.
+Currently focused on Virginia (Richmond, Henrico, Chesterfield, Prince William) and Maryland (Prince George's, Montgomery). With PropertyRadar off, live coverage is Virginia-only — the MD lists were PropertyRadar-sourced.
 
 8. **REI Skill Library:** 13 Claude Co-Work skill files (`.skill`/`.plugin` ZIPs) for distribution to DataSift community via [learn.datasift.ai/claude-skills-rei](https://learn.datasift.ai/claude-skills-rei). Skills teach Claude specific REI workflows when uploaded to Co-Work sessions or Projects.
 
@@ -45,11 +45,11 @@ pip install -r requirements.txt
 playwright install chromium
 cp .env.example .env  # then fill in credentials
 
-# Run — PropertyRadar pulls (primary acquisition source)
-python src/main.py daily                          # pull deltas across all configured PR lists
-python src/main.py historical                     # same flow (PR has no Added-Date filter; delta is membership-diff)
-python src/main.py daily --split                  # separate CSV per list
-python src/main.py daily -v                       # verbose/debug logging
+# Run — PropertyRadar pulls (DISABLED by default; pulls nothing without the flag)
+python src/main.py daily --enable-propertyradar   # pull deltas across all configured PR lists
+python src/main.py historical --enable-propertyradar   # same flow (PR has no Added-Date filter; delta is membership-diff)
+python src/main.py daily --enable-propertyradar --split   # separate CSV per list
+python src/main.py daily --enable-propertyradar -v        # verbose/debug logging
 
 # Richmond Vacant Building List — vacancy registry feed (notice_type=vacant_building, NOT code_violation)
 python src/main.py richmond-vacant                # probe rva.gov for newest PDF, diff vs state, enrich, CSV
@@ -104,7 +104,7 @@ hang `pytest tests/` indefinitely. Run those explicitly by path.
 - **Richmond vacant:** `main.py` → `richmond_vacant_puller.py` (probe rva.gov PDF → pdfplumber) → enrichment → CSV
 - **Market Finder:** `extract_market_finder.py` → DataSift Market Finder (Playwright) → paginate all ZIP + neighborhood data → JSON
 
-- **main.py** — CLI entry point. Modes: `daily`/`historical` (PropertyRadar pulls), `va-public-notice`, `chesterfield-code-violation`, `richmond-vacant`, `csv-import`, `phone-validate`, `manage-presets`, `manage-sold`, plus analysis modes (`comp`, `rehab`, `analyze-deal`, `market-analysis`, `buyer-prospect`, `deep-prospect`, `lead-manage`, `setup-sequences`, `niche-sequential`, `playbook`).
+- **main.py** — CLI entry point. Modes: `daily`/`historical` (PropertyRadar pulls — disabled by default), `va-public-notice`, `chesterfield-code-violation`, `richmond-vacant`, `csv-import`, `phone-validate`, `manage-presets`, `manage-sold`, plus analysis modes (`comp`, `rehab`, `analyze-deal`, `market-analysis`, `buyer-prospect`, `deep-prospect`, `lead-manage`, `setup-sequences`, `niche-sequential`, `playbook`).
 - **propertyradar_puller.py** — Playwright automation of `app.propertyradar.com` lists. Two-phase BufferedStore scrape (prime → poll → read RadarIDs), membership-diff vs `pr_state.json`, two-step export wizard (Continue → Purchase → Download CSV), quota guard.
 - **propertyradar_config.py** — Locked 4-list registry (`PROPERTYRADAR_LISTS`), JS snippets for the ExtJS grid Store API, selectors, state-file paths, schema versioning.
 - **propertyradar_parser.py** — PR CSV → `NoticeData`. Handles PR's abbreviated column names ("Radar ID", "Mail Address", etc.) and filters PR's license-disclaimer footer rows via `_RADAR_ID_RE`.
@@ -117,7 +117,47 @@ hang `pytest tests/` indefinitely. Run those explicitly by path.
 - **market_analyzer.py** — ZIP code scoring engine. 6-factor weighted composite (Distress 30%, Value 20%, Equity 15%, Tax Delinquency 15%, Competition 10%, DOM 10%). Grades A/B/C/D, budget allocation across top ZIPs. Reads from scraped notice CSVs in `output/`.
 - **drive_uploader.py** — Google Drive upload via service account. `upload_file()` (generic, returns webViewLink) and `upload_csv()` (CSV-specific, returns file ID).
 
-## PropertyRadar Lists (current acquisition source)
+## PropertyRadar — disabled by default (2026-08-21)
+
+PropertyRadar is switched **off**. The `daily` / `historical` modes still
+exist and still dispatch to `propertyradar_puller`, but the puller is
+gated behind `propertyradar_config.is_enabled()` and returns immediately
+with a warning unless explicitly turned on.
+
+Nothing was deleted — `propertyradar_puller.py`, `propertyradar_config.py`,
+`propertyradar_parser.py`, `propertyradar_quota.py`, their 91 unit tests,
+and `pr_state.json` / `pr_quota.json` are all intact, so re-enabling is a
+flag flip rather than a git-history recovery.
+
+**Re-enable with any one of:**
+
+```bash
+python src/main.py daily --enable-propertyradar   # CLI, per-run
+PROPERTYRADAR_ENABLED=true python src/main.py daily   # env, per-shell
+```
+
+```jsonc
+{ "mode": "daily", "enable_propertyradar": true,     // Apify Actor input
+  "pr_username": "...", "pr_password": "..." }
+```
+
+**Consequences while it's off:**
+- A `daily` / `historical` run pulls nothing and exits cleanly (it does not
+  fail). The Apify Actor sets status "PropertyRadar disabled — nothing
+  pulled" rather than erroring.
+- PR credentials are no longer a preflight blocker for those modes.
+- `pre_probate` has no source. The type is retained in the taxonomy and the
+  DataSift list map (same as `eviction`, `divorce`, `tax_delinquent`) so
+  existing records keep working.
+- Maryland has no coverage at all — every MD list was PropertyRadar.
+- The monthly export quota stops being consumed.
+- **The 5am Apify schedule runs `mode: daily`**, so as configured it now
+  no-ops. Either add `enable_propertyradar: true` to the schedule input or
+  repoint it at `va-public-notice` / `chesterfield-code-violation` /
+  `richmond-vacant`. Remember the schedule's input is independent of the
+  Actor's Default Input.
+
+## PropertyRadar Lists (retained, disabled by default)
 
 Four lists are pre-configured on the PR account and locked into `propertyradar_config.PROPERTYRADAR_LISTS`:
 
@@ -162,11 +202,12 @@ apify push
 
 ### Actor Input (configured in Apify Console or `input.json`)
 - `mode` (required, enum): one of
-  - `daily` / `historical` — PropertyRadar list pulls. Requires `pr_username` + `pr_password`. Delta is membership-diff; the two modes behave identically (PR has no Added-Date filter).
+  - `daily` / `historical` — PropertyRadar list pulls. **Disabled by default**: also set `enable_propertyradar: true`, otherwise the run ends immediately having pulled nothing. Requires `pr_username` + `pr_password` once enabled. Delta is membership-diff; the two modes behave identically (PR has no Added-Date filter).
   - `chesterfield-code-violation` — Chesterfield ACA bulk code violation report (anonymous, no creds). Daily-cadence recommended.
   - `richmond-vacant` — Richmond Vacant Building List vacancy registry (anonymous, no creds). Bi-annual cadence; safe to schedule monthly (no-ops if no new publication).
   - `va-public-notice` — Virginia Press Association notices (Estate Claims→probate, Foreclosures→foreclosure, Tax Deeds→tax_sale). Requires `vapn_username` + `vapn_password` + `captcha_api_key`. Daily-cadence recommended.
-- `pr_username`, `pr_password`: PropertyRadar login secrets — required ONLY for `daily` / `historical`.
+- `enable_propertyradar`: boolean, default `false`. Master switch for the PropertyRadar path.
+- `pr_username`, `pr_password`: PropertyRadar login secrets — required ONLY for `daily` / `historical` with `enable_propertyradar: true`.
 - `vapn_username`, `vapn_password`, `captcha_api_key`: VPA Smart Search login + 2Captcha key — required ONLY for `va-public-notice`. Optional `va_mode` (daily/historical), `va_since` (YYYY-MM-DD).
 - `aca_start`, `aca_end`, `aca_first_pull_days`: optional date-window overrides for `chesterfield-code-violation` mode.
 - `google_drive_folder_id`, `google_service_account_key`: optional Google Drive upload (all modes).
@@ -183,9 +224,15 @@ apify push
 2. **Daily Chesterfield code violation pull** (recommended):
    - Cron: `0 9 * * *` (or operator's preferred time)
    - Input: `{"mode": "chesterfield-code-violation"}` plus any DataSift/Drive secrets — schedule input does NOT inherit Actor's Default Input (see memory: apify-schedule-input-independent).
-3. **Daily PropertyRadar pull** (existing):
-   - Cron: `0 10 * * *` (one hour after Chesterfield, or operator's preferred 5am)
-   - Input: `{"mode": "daily", "pr_username": "...", "pr_password": "..."}` plus all enrichment / DataSift secrets.
+3. **Daily PropertyRadar pull** — ⚠️ **currently a no-op.** The existing
+   `siftstack-daily-5am-et` schedule sends `{"mode": "daily"}`, and with
+   PropertyRadar disabled that run now exits immediately having pulled
+   nothing. Pick one:
+   - **Retire it** — repoint the 5am schedule at `va-public-notice` (the
+     highest-volume active feed), or delete the schedule.
+   - **Restore PR** — add `"enable_propertyradar": true` to the schedule's
+     input alongside `pr_username` / `pr_password`.
+   - Original input for reference: `{"mode": "daily", "enable_propertyradar": true, "pr_username": "...", "pr_password": "..."}` plus all enrichment / DataSift secrets.
 4. **Richmond Vacant Building List** (manual on-demand): no schedule. Run from Apify Console → Run Actor → set `mode: "richmond-vacant"` → Start when you hear a new publication has dropped (~every 6 months).
 5. **Daily Virginia public-notice pull**:
    - Cron: `0 8 * * *` (or operator's preferred time)
@@ -209,7 +256,7 @@ apify push
 - `code_violation` — Chesterfield ACA bulk report; owner of record, violation type, compliance deadline
 - `vacant_building` — Richmond Vacant Building List vacancy registry
 - `eviction`, `divorce` — no active feed; types retained for CSV/DataSift compatibility
-- `pre_probate` — **PropertyRadar-only**, property-records deceased signal (owner is dead per assessor data; no executor named, no court filing). Distinct from `probate` because DM identification depends on obituary search rather than a named PR/executor on the filing. `owner_deceased="yes"` is set upfront so a failed obituary lookup still tags the record correctly.
+- `pre_probate` — **PropertyRadar-only, so no active feed while PR is disabled**; property-records deceased signal (owner is dead per assessor data; no executor named, no court filing). Distinct from `probate` because DM identification depends on obituary search rather than a named PR/executor on the filing. `owner_deceased="yes"` is set upfront so a failed obituary lookup still tags the record correctly.
 
 `eviction`, `divorce`, and `tax_delinquent` have no acquisition source in
 VA/MD today. They stay in the taxonomy because `datasift_formatter` maps
@@ -775,11 +822,16 @@ plugin-name.plugin (ZIP containing):
 
 ### PropertyRadar Architecture Notes
 
-PropertyRadar is the active acquisition source. The four pre-configured
-lists (see "PropertyRadar Lists" section above) auto-refresh daily on the
-PR side; the puller's job is to pull **new records added since the last
-successful run** and feed them through the existing enrichment + DataSift
-upload pipeline.
+PropertyRadar is **disabled by default** as of 2026-08-21 — see
+"PropertyRadar — disabled by default" below. The code, tests, list
+registry, and quota tracker are all retained and unmodified; nothing calls
+them unless the switch is thrown. The rest of this section describes the
+behavior you get once it is enabled.
+
+The four pre-configured lists (see "PropertyRadar Lists" section above)
+auto-refresh daily on the PR side; the puller's job is to pull **new
+records added since the last successful run** and feed them through the
+existing enrichment + DataSift upload pipeline.
 
 **Account constraints:**
 - We're on the Solo plan (10K monthly export quota). Tracked in `pr_quota.json` with 50/80/95/100% Slack alerts.
@@ -788,7 +840,7 @@ upload pipeline.
 - "Purchase" / "Export" both count against quota even for re-exports of the same list — never export the full list when the diff is empty.
 
 **Coverage gaps in VA/MD:**
-- PropertyRadar covers Foreclosure ✓, Divorce ✓, Assessor/Recorder (incl. the deceased-owner signal for `pre_probate`) ✓.
+- PropertyRadar (when enabled) covers Foreclosure ✓, Divorce ✓, Assessor/Recorder (incl. the deceased-owner signal for `pre_probate`) ✓. While it's disabled, none of those arrive from PR.
 - Probate, Eviction, Code Violation are **NOT available** from PropertyRadar in VA/MD. Probate is now filled by the VA public-notice feed (Estate Claims) and Code Violation by the Chesterfield ACA feed. Eviction has no source.
 
 **`pre_probate` vs `probate`:**

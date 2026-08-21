@@ -2,13 +2,21 @@
     "title": "SiftStack Input",
     "type": "object",
     "schemaVersion": 1,
-    "required": ["mode"],
+    "required": [
+        "mode"
+    ],
     "properties": {
         "mode": {
             "title": "Run Mode",
             "type": "string",
-            "description": "daily / historical = PropertyRadar list pulls (requires pr_username + pr_password). chesterfield-code-violation = Chesterfield ACA bulk code violation report (anonymous). richmond-vacant = Richmond Vacant Building List vacancy registry (anonymous). va-public-notice = Virginia Press Association notices (estate/foreclosure/tax-deed); requires vapn_username + vapn_password + captcha_api_key. The chesterfield + richmond modes do NOT need credentials.",
-            "enum": ["daily", "historical", "chesterfield-code-violation", "richmond-vacant", "va-public-notice"],
+            "description": "daily / historical = PropertyRadar list pulls (requires pr_username + pr_password). chesterfield-code-violation = Chesterfield ACA bulk code violation report (anonymous). richmond-vacant = Richmond Vacant Building List vacancy registry (anonymous). va-public-notice = Virginia Press Association notices (estate/foreclosure/tax-deed); requires vapn_username + vapn_password + captcha_api_key. The chesterfield + richmond modes do NOT need credentials.  NOTE: daily/historical drive the PropertyRadar pull, which is disabled by default \u2014 set enable_propertyradar to use them.",
+            "enum": [
+                "daily",
+                "historical",
+                "chesterfield-code-violation",
+                "richmond-vacant",
+                "va-public-notice"
+            ],
             "default": "daily",
             "editor": "select"
         },
@@ -37,7 +45,10 @@
             "title": "VA Public Notice Pull Mode (va-public-notice only)",
             "type": "string",
             "description": "daily = notices since last run (delta). historical = last 12 months. Daily-cadence recommended.",
-            "enum": ["daily", "historical"],
+            "enum": [
+                "daily",
+                "historical"
+            ],
             "default": "daily",
             "editor": "select"
         },
@@ -47,6 +58,13 @@
             "description": "Override the since-date (YYYY-MM-DD). Leave blank to use state (last run date) / 7-day first-run window.",
             "editor": "textfield",
             "default": ""
+        },
+        "enable_propertyradar": {
+            "title": "Enable PropertyRadar",
+            "type": "boolean",
+            "description": "PropertyRadar is DISABLED by default. Leave off and the daily/historical modes pull nothing \u2014 use va-public-notice, chesterfield-code-violation, or richmond-vacant instead. Switch on (and supply pr_username/pr_password) to restore the PropertyRadar list pull.",
+            "default": false,
+            "editor": "checkbox"
         },
         "pr_username": {
             "title": "PropertyRadar Email",
